@@ -1,0 +1,11 @@
+[package]
+name = "codb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+binrw = "0.14.1"
+itertools = "0.14.0"
+ron = "0.10.1"
+serde = { version = "1.0.219", features = ["derive"] }
+thiserror = "2.0.12"
