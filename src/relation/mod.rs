@@ -1,123 +1,105 @@
-use std::io;
+use std::{io, ops::RangeBounds};
 
-use crate::ttype::{ScalarType, ScalarValue};
+use crate::typesystem::{ttype::CompositeType, value::CompositeValue, NestedIdents, TypeError};
 
 mod memory;
 mod file;
 
+pub type PKey = CompositeValue;
+pub type Row = CompositeValue;
 pub type RowSize = u64;
-
-pub enum RowIterError {
-    IoError
-}
-
-#[binrw::binrw]
-#[brw(big)]
-#[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord)]
-pub struct Row {
-    #[bw(try_calc = columns.len().try_into())]
-    #[br(temp)]
-    len: u16,
-    #[br(count = len)]
-    columns: Vec<ScalarValue>,
-}
-
-impl Row {
-    pub fn new(columns: impl Into<Vec<ScalarValue>>) -> Row {
-        Row {
-            columns: columns.into(),
-        }
-    }
-}
 
 pub trait RelationRef {
     fn schema(&self) -> &Schema;
-    fn iter(&self) -> impl Iterator<Item = io::Result<Row>>;
-    fn contains(&self, row: &Row) -> io::Result<bool>;
+    fn range(&self, nested_idents: impl Into<Box<[NestedIdents]>>, range: impl RangeBounds<CompositeValue>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError>;
     
     #[cfg(test)]
-    fn eq(&self, other: &impl RelationRef) -> io::Result<bool> {
+    fn eq(&self, other: &impl RelationRef) -> bool {
+        use itertools::Itertools;
+
         if self.schema() != other.schema() {
-            return Ok(false);
+            return false;
         }
-        for row in self.iter() {
-            if !other.contains(&row.unwrap())? {
-                return Ok(false);
+
+        let zipped = self.range([], ..).unwrap().zip_longest(other.range([], ..).unwrap());
+        
+        for rows in zipped {
+            match rows {
+                itertools::EitherOrBoth::Both(left, right) => if left.unwrap() != right.unwrap() {
+                    return false;
+                },
+                itertools::EitherOrBoth::Left(_) => return false,
+                itertools::EitherOrBoth::Right(_) => return false,
             }
         }
-        Ok(true)
+        
+        true
     }
     
     #[cfg(test)]
-    fn draw(&self) -> io::Result<String> {
+    fn draw(&self) -> String {
         let mut out_string = String::new();
-        
-        for col in &self.schema().columns {
-            out_string += &format!("{:?}\t", col.name);
-        }
-        out_string += "\n";
 
-        for row in self.iter() {
-            for col in row.unwrap().columns {
-                out_string += &format!("{col}\t");
-            }
-            out_string += "\n";
+        out_string += &format!("{:?}\n", self.schema().ttype);
+
+        for row in self.range([], ..).unwrap() {
+            out_string += &format!("{:?}\n", row.unwrap());
         }
 
         // remove final \n
         out_string.pop();
 
-        Ok(out_string)
+        out_string
     }
 }
 
 pub trait Relation: RelationRef {
-    fn insert(&mut self, new_row: Row) -> io::Result<bool>;
+    fn insert(&mut self, new_row: Row) -> Result<io::Result<bool>, TypeError>;
     
-    fn extend(&mut self, new_rows: impl IntoIterator<Item = Row>) -> io::Result<RowSize> {
+    fn extend(&mut self, new_rows: impl IntoIterator<Item = Row>) -> Result<io::Result<RowSize>, TypeError> {
         let mut count = 0;
         for new_row in new_rows {
             self.insert(new_row)?;
             count += 1;
         }
-        Ok(count)
+        Ok(Ok(count))
     }
     
-    fn remove(&mut self, row: &Row) -> io::Result<bool>;
+    fn remove(&mut self, pkey: &PKey) -> Result<io::Result<Option<Row>>, TypeError>;
     fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> io::Result<RowSize>;
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaError {
+    #[error("cannot make primary key: {0}")]
+    PrimaryKeyInvalid(TypeError),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Schema {
-    columns: Vec<Column>
+    ttype: CompositeType,
+    pkey: Box<[NestedIdents]>,
 }
 
 impl Schema {
-    pub fn type_check(&self, row: &Row) -> bool {
-        if self.columns.len() != row.columns.len() {
-            return false;
-        }
-        self.columns.iter().zip(&row.columns)
-            .all(|(column, value)| column.ttype.type_check(value))
-    }
-}
+    pub fn new(ttype: CompositeType, pkey: Box<[NestedIdents]>) -> Result<Schema, SchemaError> {
+        ttype.select(&pkey).map_err(|err| SchemaError::PrimaryKeyInvalid(err))?;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Column {
-    name: String,
-    ttype: ScalarType,
-}
-
-impl Column {
-    pub fn new(name: impl Into<String>, ttype: ScalarType) -> Column {
-        Column {
-            name: name.into(),
+        Ok(Schema {
             ttype,
-        }
+            pkey,
+        })
     }
-}
 
-pub struct RowUpdate {
-    index: RowSize,
-    new_row: Row,
+    pub fn ttype(&self) -> &CompositeType {
+        &self.ttype
+    }
+
+    pub fn pkey_ttype(&self) -> CompositeType {
+        self.ttype.select(&self.pkey).expect("invalid primary key idents")
+    }
+
+    pub fn pkey(&self) -> &[NestedIdents] {
+        &self.pkey
+    }
 }

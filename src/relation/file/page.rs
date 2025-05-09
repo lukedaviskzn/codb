@@ -1,8 +1,8 @@
-use std::{fs::File, io::{self, Seek}, num::NonZeroU64};
+use std::{fs::File, io::{self, Seek, Write}, num::NonZeroU64};
 
 use binrw::{BinRead, BinWrite};
 
-use crate::error;
+use crate::{error::{self, map_binrw_error}, relation::Row};
 
 pub const PAGE_SIZE: usize = 4096;
 pub const OVERFLOW_PAYLOAD_MAX: usize = PAGE_SIZE - 12;
@@ -10,7 +10,7 @@ pub const BTREE_INTERIOR_MAX_KEYS: usize = 60;
 pub const BTREE_KEY_LOCAL_PAYLOAD_MAX: usize = (PAGE_SIZE - 10) / BTREE_INTERIOR_MAX_KEYS - 8;
 pub const BTREE_LEAF_MAX_KEYS: usize = (PAGE_SIZE - 4) / (12 + BTREE_KEY_LOCAL_PAYLOAD_MAX);
 
-type PagePtr = NonZeroU64;
+pub type PagePtr = NonZeroU64;
 
 #[derive(Debug)]
 pub struct Pager {
@@ -44,6 +44,13 @@ impl Pager {
         page.write(&mut self.file).map_err(error::map_binrw_error)?;
         Ok(page_num)
     }
+
+    pub fn free_page(&mut self, page_num: PagePtr) -> io::Result<Page> {
+        let page = self.read_page(page_num)?;
+        self.file.seek(io::SeekFrom::Start(page_num.get() * PAGE_SIZE as u64))?;
+        self.file.write(&[0; PAGE_SIZE])?;
+        Ok(page)
+    }
 }
 
 #[binrw::binrw]
@@ -57,25 +64,38 @@ pub struct Header {
 
 #[binrw::binrw]
 #[derive(Debug, PartialEq, Eq)]
-pub enum FileVersion {
-    #[brw(magic(0u32))]
-    V1,
+pub struct FileVersion {
+    pub major: u8,
+    pub minor: u8,
+    pub patch: u16,
+}
+
+impl Default for FileVersion {
+    fn default() -> FileVersion {
+        FileVersion {
+            major: env!("CARGO_PKG_VERSION_MAJOR").parse().expect("Invalid CARGO_PKG_VERSION_MAJOR"),
+            minor: env!("CARGO_PKG_VERSION_MINOR").parse().expect("Invalid CARGO_PKG_VERSION_MINOR"),
+            patch: env!("CARGO_PKG_VERSION_PATCH").parse().expect("Invalid CARGO_PKG_VERSION_PATCH"),
+        }
+    }
 }
 
 #[binrw::binrw]
 #[brw(big)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
     #[brw(magic(b"OV"))]
     Overflow(OverflowPage),
-    #[brw(magic(b"BC"))]
+    #[brw(magic(b"BR"))]
+    BTreeRoot(BTreeRootPage),
+    #[brw(magic(b"BI"))]
     BTreeInterior(BTreeInteriorPage),
     #[brw(magic(b"BL"))]
     BTreeLeaf(BTreeLeafPage),
 }
 
 #[binrw::binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverflowPage {
     // payload len will always be withing u16 range
     #[bw(calc = payload.len().try_into().unwrap_or_default())]
@@ -90,7 +110,13 @@ pub struct OverflowPage {
 }
 
 #[binrw::binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BTreeRootPage {
+    pub first_page: PagePtr,
+}
+
+#[binrw::binrw]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BTreeInteriorPage {
     // keys will always be withing u16 range
     #[bw(calc = keys.len().try_into().unwrap_or_default())]
@@ -119,8 +145,26 @@ pub struct BTreeKey {
     pub local_payload: Vec<u8>,
 }
 
+impl BTreeKey {
+    pub fn allocate(_pager: &mut Pager, row: &Row) -> io::Result<BTreeKey> {
+        let mut bytes = io::Cursor::new(Vec::new());
+        row.write(&mut bytes).map_err(map_binrw_error)?;
+        let bytes = bytes.into_inner();
+
+        if bytes.len() > BTREE_KEY_LOCAL_PAYLOAD_MAX {
+            todo!();
+        }
+
+        Ok(BTreeKey {
+            len: bytes.len() as u32,
+            overflow_page: None,
+            local_payload: bytes,
+        })
+    }
+}
+
 #[binrw::binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BTreeLeafPage {
     // keys will always be withing u16 range
     #[bw(calc = keys.len().try_into().unwrap_or_default())]
