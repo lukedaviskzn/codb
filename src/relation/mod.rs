@@ -1,27 +1,27 @@
 use std::{io, ops::RangeBounds};
 
-use crate::typesystem::{ttype::CompositeType, value::CompositeValue, NestedIdents, TypeError};
+use crate::typesystem::{registry::{TTypeId, TypeRegistry, TypeRegistryError}, ttype::TType, value::Value, NestedIdents, TypeError};
 
 mod memory;
 mod file;
 
-pub type PKey = CompositeValue;
-pub type Row = CompositeValue;
+pub type PKey = Value;
+pub type Row = Value;
 pub type RowSize = u64;
 
 pub trait RelationRef {
     fn schema(&self) -> &Schema;
-    fn range(&self, nested_idents: impl Into<Box<[NestedIdents]>>, range: impl RangeBounds<CompositeValue>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError>;
+    fn range(&self, registry: &TypeRegistry, nested_idents: impl Into<Box<[NestedIdents]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError>;
     
     #[cfg(test)]
-    fn eq(&self, other: &impl RelationRef) -> bool {
+    fn eq(&self, registry: &TypeRegistry, other: &impl RelationRef) -> bool {
         use itertools::Itertools;
 
         if self.schema() != other.schema() {
             return false;
         }
 
-        let zipped = self.range([], ..).unwrap().zip_longest(other.range([], ..).unwrap());
+        let zipped = self.range(registry, [], ..).unwrap().zip_longest(other.range(registry, [], ..).unwrap());
         
         for rows in zipped {
             match rows {
@@ -37,12 +37,12 @@ pub trait RelationRef {
     }
     
     #[cfg(test)]
-    fn draw(&self) -> String {
+    fn draw(&self, registry: &TypeRegistry) -> String {
         let mut out_string = String::new();
 
-        out_string += &format!("{:?}\n", self.schema().ttype);
+        out_string += &format!("{:?}\n", registry.get_by_id(self.schema().ttype_id()).unwrap());
 
-        for row in self.range([], ..).unwrap() {
+        for row in self.range(registry, [], ..).unwrap() {
             out_string += &format!("{:?}\n", row.unwrap());
         }
 
@@ -54,18 +54,18 @@ pub trait RelationRef {
 }
 
 pub trait Relation: RelationRef {
-    fn insert(&mut self, new_row: Row) -> Result<io::Result<bool>, TypeError>;
+    fn insert(&mut self, registry: &TypeRegistry, new_row: Row) -> Result<io::Result<bool>, TypeError>;
     
-    fn extend(&mut self, new_rows: impl IntoIterator<Item = Row>) -> Result<io::Result<RowSize>, TypeError> {
+    fn extend(&mut self, registry: &TypeRegistry, new_rows: impl IntoIterator<Item = Row>) -> Result<io::Result<RowSize>, TypeError> {
         let mut count = 0;
         for new_row in new_rows {
-            self.insert(new_row)?;
+            self.insert(registry, new_row)?;
             count += 1;
         }
         Ok(Ok(count))
     }
     
-    fn remove(&mut self, pkey: &PKey) -> Result<io::Result<Option<Row>>, TypeError>;
+    fn remove(&mut self, registry: &TypeRegistry, pkey: &PKey) -> Result<io::Result<Option<Row>>, TypeError>;
     fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> io::Result<RowSize>;
 }
 
@@ -73,30 +73,32 @@ pub trait Relation: RelationRef {
 pub enum SchemaError {
     #[error("cannot make primary key: {0}")]
     PrimaryKeyInvalid(TypeError),
+    #[error("{0}")]
+    TypeRegistryError(#[from] TypeRegistryError),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Schema {
-    ttype: CompositeType,
+    ttype_id: TTypeId,
     pkey: Box<[NestedIdents]>,
 }
 
 impl Schema {
-    pub fn new(ttype: CompositeType, pkey: Box<[NestedIdents]>) -> Result<Schema, SchemaError> {
-        ttype.select(&pkey).map_err(|err| SchemaError::PrimaryKeyInvalid(err))?;
+    pub fn new(registry: &TypeRegistry, ttype_id: TTypeId, pkey: Box<[NestedIdents]>) -> Result<Schema, SchemaError> {
+        registry.get_by_id(&ttype_id)?.select(registry, &pkey).map_err(|err| SchemaError::PrimaryKeyInvalid(err))?;
 
         Ok(Schema {
-            ttype,
+            ttype_id,
             pkey,
         })
     }
 
-    pub fn ttype(&self) -> &CompositeType {
-        &self.ttype
+    pub fn ttype_id(&self) -> &TTypeId {
+        &self.ttype_id
     }
 
-    pub fn pkey_ttype(&self) -> CompositeType {
-        self.ttype.select(&self.pkey).expect("invalid primary key idents")
+    pub fn pkey_ttype(&self, registry: &TypeRegistry) -> Result<TType, TypeRegistryError> {
+        Ok(registry.get_by_id(&self.ttype_id)?.select(registry, &self.pkey).expect("invalid primary key idents"))
     }
 
     pub fn pkey(&self) -> &[NestedIdents] {

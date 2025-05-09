@@ -2,8 +2,7 @@ use std::fmt::{Debug, Display};
 
 use itertools::Itertools;
 
-use super::{DuplicateField, NestedIdents, TypeError};
-
+use crate::typesystem::{registry::{TTypeId, TypeRegistry}, ttype::{CompositeType, ScalarType, TType}, DuplicateField, NestedIdents, TypeError};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Value {
@@ -12,21 +11,28 @@ pub enum Value {
 }
 
 impl Value {
-    pub const UNIT: Value = Value::Composite(CompositeValue::UNIT);
+    pub const UNIT: Value = Value::Scalar(ScalarValue::Unit);
     pub const TRUE: Value = Value::Scalar(ScalarValue::Bool(true));
     pub const FALSE: Value = Value::Scalar(ScalarValue::Bool(false));
 
-    pub fn select(&self, idents: &[NestedIdents]) -> Result<Value, TypeError> {
+    pub fn ttype_id(&self) -> TTypeId {
         match self {
-            Value::Composite(value) => Ok(Value::Composite(value.select(idents)?)),
+            Value::Composite(value) => value.ttype_id(),
+            Value::Scalar(value) => value.ttype_id(),
+        }
+    }
+
+    pub fn select(&self, registry: &TypeRegistry, idents: &[NestedIdents]) -> Result<Value, TypeError> {
+        match self {
+            Value::Composite(value) => Ok(Value::Composite(value.select(registry, idents)?)),
             Value::Scalar(value) => Ok(Value::Scalar(value.select(idents)?)),
         }
     }
 
     pub fn dot(&self, ident: &str) -> Result<Value, TypeError> {
         match self {
-            Value::Composite(value) => Ok(value.dot(ident)?),
-            Value::Scalar(value) => Ok(value.dot(ident)?),
+            Value::Composite(value) => value.dot(ident),
+            Value::Scalar(_) => Err(TypeError::ScalarField(ident.into())),
         }
     }
 }
@@ -47,27 +53,32 @@ pub enum CompositeValue {
 }
 
 impl CompositeValue {
-    pub const UNIT: CompositeValue = CompositeValue::Struct(StructValue::UNIT);
-    
-    pub fn new_struct(fields: Vec<FieldValue>) -> Result<CompositeValue, DuplicateField> {
-        Ok(CompositeValue::Struct(StructValue::new(fields)?))
+    pub fn new_struct(registry: &TypeRegistry, ttype_id: &TTypeId, fields: Vec<FieldValue>) -> Result<CompositeValue, TypeError> {
+        Ok(CompositeValue::Struct(StructValue::new(registry, ttype_id, fields)?))
     }
 
-    pub fn new_enum(tag: FieldValue) -> CompositeValue {
-        CompositeValue::Enum(EnumValue::new(tag))
+    pub fn new_enum(registry: &TypeRegistry, ttype_id: &TTypeId, tag: FieldValue) -> Result<CompositeValue, TypeError> {
+        Ok(CompositeValue::Enum(EnumValue::new(registry, ttype_id, tag)?))
     }
 
-    pub fn select(&self, idents: &[NestedIdents]) -> Result<CompositeValue, TypeError> {
+    pub fn ttype_id(&self) -> TTypeId {
         match self {
-            CompositeValue::Struct(value) => Ok(CompositeValue::Struct(value.select(idents)?)),
+            CompositeValue::Struct(value) => value.ttype_id(),
+            CompositeValue::Enum(value) => value.ttype_id(),
+        }
+    }
+
+    pub fn select(&self, registry: &TypeRegistry, idents: &[NestedIdents]) -> Result<CompositeValue, TypeError> {
+        match self {
+            CompositeValue::Struct(value) => Ok(CompositeValue::Struct(value.select(registry, idents)?)),
             CompositeValue::Enum(value) => Ok(CompositeValue::Enum(value.select(idents)?)),
         }
     }
 
     pub fn dot(&self, ident: &str) -> Result<Value, TypeError> {
         match self {
-            CompositeValue::Struct(value) => Ok(value.dot(ident)?),
-            CompositeValue::Enum(value) => Ok(value.dot(ident)?),
+            CompositeValue::Struct(value) => value.dot(ident),
+            CompositeValue::Enum(_) => Err(TypeError::DotTag(ident.into())),
         }
     }
 }
@@ -83,6 +94,7 @@ impl Debug for CompositeValue {
 
 #[derive(Clone, Eq, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct StructValue {
+    ttype_id: TTypeId,
     fields: Vec<FieldValue>,
 }
 
@@ -105,15 +117,20 @@ impl PartialOrd for StructValue {
 }
 
 impl StructValue {
-    pub const UNIT: StructValue = StructValue { fields: Vec::new() };
-    
-    pub fn new(fields: Vec<FieldValue>) -> Result<StructValue, DuplicateField> {
+    pub fn new(registry: &TypeRegistry, ttype_id: &TTypeId, fields: Vec<FieldValue>) -> Result<StructValue, TypeError> {
         if let Some(_) = fields.iter().duplicates_by(|f| &f.name).next() {
-            Err(DuplicateField)
+            Err(DuplicateField.into())
         } else {
-            Ok(StructValue {
+            let value = Value::Composite(CompositeValue::Struct(StructValue {
+                ttype_id: ttype_id.clone(),
                 fields,
-            })
+            }));
+            
+            registry.get_by_id(&ttype_id)?.check(registry, &value)?;
+
+            let Value::Composite(CompositeValue::Struct(value)) = value else { unreachable!() };
+
+            Ok(value)
         }
     }
 
@@ -121,7 +138,11 @@ impl StructValue {
         &self.fields
     }
 
-    pub fn select(&self, idents: &[NestedIdents]) -> Result<StructValue, TypeError> {
+    pub fn ttype_id(&self) -> TTypeId {
+        self.ttype_id.clone()
+    }
+
+    pub fn select(&self, registry: &TypeRegistry, idents: &[NestedIdents]) -> Result<StructValue, TypeError> {
         if idents.is_empty() {
             return Ok(self.clone());
         }
@@ -132,15 +153,19 @@ impl StructValue {
             if let Some(field) = self.fields.iter().find(|f| f.name == ident.ident) {
                 let new_field = FieldValue {
                     name: field.name.clone(),
-                    value: field.value.select(&ident.children)?,
+                    value: field.value.select(registry, &ident.children)?,
                 };
                 new_fields.push(new_field);
             } else {
                 return Err(TypeError::UnknownField(ident.ident.clone()));
             }
         }
+
+        let selection_ttype = registry.get_by_id(&self.ttype_id)?
+            .select(registry, idents)?;
         
         Ok(StructValue {
+            ttype_id: TTypeId::Anonymous(Box::new(selection_ttype)),
             fields: new_fields,
         })
     }
@@ -156,10 +181,6 @@ impl StructValue {
 
 impl Debug for StructValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.fields.is_empty() {
-            return write!(f, "()");
-        }
-
         let mut d = f.debug_struct("(×)");
         
         for field in &self.fields {
@@ -172,6 +193,7 @@ impl Debug for StructValue {
 
 #[derive(Clone, PartialEq, Eq, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct EnumValue {
+    ttype_id: TTypeId,
     tag: Box<FieldValue>,
 }
 
@@ -182,10 +204,19 @@ impl PartialOrd for EnumValue {
 }
 
 impl EnumValue {
-    pub fn new(tag: FieldValue) -> EnumValue {
-        EnumValue {
+    pub fn new(registry: &TypeRegistry, ttype_id: &TTypeId, tag: FieldValue) -> Result<EnumValue, TypeError> {
+        let value = Value::Composite(CompositeValue::Enum(EnumValue {
+            ttype_id: ttype_id.clone(),
             tag: Box::new(tag),
-        }
+        }));
+
+        registry.get_by_id(ttype_id)?.check(registry, &value);
+
+        let Value::Composite(CompositeValue::Enum(value)) = value else {
+            unreachable!();
+        };
+
+        Ok(value)
     }
 
     pub fn into_tag(self) -> FieldValue {
@@ -194,6 +225,10 @@ impl EnumValue {
 
     pub fn tag(&self) -> &FieldValue {
         &self.tag
+    }
+
+    pub fn ttype_id(&self) -> TTypeId {
+        self.ttype_id.clone()
     }
 
     pub fn select(&self, idents: &[NestedIdents]) -> Result<EnumValue, TypeError> {
@@ -214,10 +249,6 @@ impl EnumValue {
         }
 
         Ok(self.clone())
-    }
-
-    pub fn dot(&self, ident: &str) -> Result<Value, TypeError> {
-        Err(TypeError::DotTag(ident.into()))
     }
 }
 
@@ -257,21 +288,23 @@ impl FieldValue {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
-// #[binrw::binrw]
 pub enum ScalarValue {
-    // #[brw(magic(0u8))]
-    Bool(
-        // #[bw(map = |x| *x as u8)]
-        // #[br(map = |x: u8| x > 0u8)]
-        bool
-    ),
-    // #[brw(magic(1u8))]
+    Unit,
+    Bool(bool),
     Int32(i32),
-    // #[brw(magic(2u8))]
     String(String),
 }
 
 impl ScalarValue {
+    pub fn ttype_id(&self) -> TTypeId {
+        match self {
+            ScalarValue::Unit => TTypeId::Scalar(ScalarType::Unit),
+            ScalarValue::Bool(_) => TTypeId::Scalar(ScalarType::Bool),
+            ScalarValue::Int32(_) => TTypeId::Scalar(ScalarType::Int32),
+            ScalarValue::String(_) => TTypeId::Scalar(ScalarType::String),
+        }
+    }
+
     pub fn select(&self, idents: &[NestedIdents]) -> Result<ScalarValue, TypeError> {
         if let Some(first) = idents.first() {
             Err(TypeError::ScalarField(first.ident.clone()))
@@ -279,15 +312,12 @@ impl ScalarValue {
             Ok(self.clone())
         }
     }
-
-    pub fn dot(&self, ident: &str) -> Result<Value, TypeError> {
-        Err(TypeError::ScalarField(ident.into()))
-    }
 }
 
 impl Debug for ScalarValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Unit => write!(f, "()"),
             Self::Bool(value) => Debug::fmt(value, f),
             Self::Int32(value) => Debug::fmt(value, f),
             Self::String(value) => Debug::fmt(value, f),
@@ -298,9 +328,8 @@ impl Debug for ScalarValue {
 impl Display for ScalarValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ScalarValue::Bool(value) => Debug::fmt(value, f),
-            ScalarValue::Int32(value) => Debug::fmt(value, f),
-            ScalarValue::String(value) => Debug::fmt(value, f),
+            Self::String(value) => Display::fmt(value, f),
+            value => Debug::fmt(value, f),
         }
     }
 }

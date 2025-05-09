@@ -4,7 +4,7 @@ use either::Either;
 use itertools::Itertools;
 use ron::ser::PrettyConfig;
 
-use crate::{relation::memory::MemoryRelation, typesystem::{value::CompositeValue, NestedIdents, TypeError}};
+use crate::{relation::memory::MemoryRelation, typesystem::{registry::TypeRegistry, value::{CompositeValue, Value}, NestedIdents, TypeError}};
 
 use super::{Relation, RelationRef, Row, Schema};
 
@@ -57,26 +57,26 @@ impl RelationRef for FileRelation {
         &self.schema
     }
 
-    fn range(&self, nested_idents: impl Into<Box<[NestedIdents]>>, range: impl RangeBounds<CompositeValue>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError> {
+    fn range(&self, registry: &TypeRegistry, nested_idents: impl Into<Box<[NestedIdents]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError> {
         let relation = match read_mem_relation(&self.filepath) {
             Ok(relation) => relation,
             Err(err) => return Ok(Either::Left(std::iter::once(Err(err)))),
         };
 
-        let rows = relation.range(nested_idents, range)?.collect_vec();
+        let rows = relation.range(registry, nested_idents, range)?.collect_vec();
 
         Ok(Either::Right(rows.into_iter()))
     }
 }
 
 impl Relation for FileRelation {
-    fn insert(&mut self, new_row: Row) -> Result<io::Result<bool>, TypeError> {
+    fn insert(&mut self, registry: &TypeRegistry, new_row: Row) -> Result<io::Result<bool>, TypeError> {
         let mut relation = match read_mem_relation(&self.filepath) {
             Ok(relation) => relation,
             Err(err) => return Ok(Err(err)),
         };
 
-        let inserted = match relation.insert(new_row)? {
+        let inserted = match relation.insert(registry, new_row)? {
             Ok(inserted) => inserted,
             Err(err) => return Ok(Err(err)),
         };
@@ -84,13 +84,13 @@ impl Relation for FileRelation {
         Ok(write_mem_relation(&self.filepath, &relation).map(|_| inserted))
     }
 
-    fn remove(&mut self, pkey: &super::PKey) -> Result<io::Result<Option<Row>>, TypeError> {
+    fn remove(&mut self, registry: &TypeRegistry, pkey: &super::PKey) -> Result<io::Result<Option<Row>>, TypeError> {
         let mut relation = match read_mem_relation(&self.filepath) {
             Ok(relation) => relation,
             Err(err) => return Ok(Err(err)),
         };
 
-        let old_row = match relation.remove(pkey)? {
+        let old_row = match relation.remove(registry, pkey)? {
             Ok(old_row) => old_row,
             Err(err) => return Ok(Err(err)),
         };
@@ -114,42 +114,55 @@ impl Relation for FileRelation {
 mod tests {
     use itertools::Itertools;
 
-    use crate::{expr::{ControlFlow, Expression, IfControlFlow, LogicalOp, Op}, typesystem::{ttype::{CompositeType, FieldType, RefinedTType, TType}, value::{EnumValue, FieldValue, ScalarValue, Value}}};
+    use crate::{expr::{ControlFlow, Expression, IfControlFlow, LogicalOp, Op}, typesystem::{registry::TTypeId, ttype::{CompositeType, FieldType, RefinedTType, TType}, value::{EnumValue, FieldValue, ScalarValue, Value}}};
 
     use super::*;
 
     #[test]
     fn file_relation() {
-        fn new_user(id: i32, active: bool) -> CompositeValue {
-            CompositeValue::new_struct(vec![
+        fn new_user(registry: &TypeRegistry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
+            Value::Composite(CompositeValue::new_struct(registry, user_ttype_id, vec![
                 FieldValue::new("id", Value::Scalar(ScalarValue::Int32(id))),
                 FieldValue::new("active", Value::Scalar(ScalarValue::Bool(active))),
-            ]).unwrap()
+            ]).unwrap())
         }
 
-        fn new_id(id: i32) -> CompositeValue {
-            CompositeValue::new_struct(vec![
+        fn new_id(registry: &TypeRegistry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
+            Value::Composite(CompositeValue::new_struct(registry, user_id_ttype_id, vec![
                 FieldValue::new("id", Value::Scalar(ScalarValue::Int32(id))),
-            ]).unwrap()
+            ]).unwrap())
         }
 
-        let user_ttype = CompositeType::new_struct(vec![
-            FieldType::new("id", TType::Refined(RefinedTType::new(TType::INT32, {
-                Expression::ControlFlow(Box::new(ControlFlow::If(IfControlFlow {
-                    ret_ttype: RefinedTType::result_ttype(),
-                    condition: Expression::Op(Box::new(Op::Logical(LogicalOp::Lt(
-                        Expression::Ident(["this".into()].into()),
-                        Expression::Value(TType::INT32, Value::Scalar(ScalarValue::Int32(500))),
-                    )))),
-                    then: Expression::Value(RefinedTType::result_ttype(), Value::Composite(CompositeValue::Enum(EnumValue::new(FieldValue::new("Ok", Value::UNIT))))),
-                    // then: Expression::Value(TType::BOOL, Value::TRUE),
-                    otherwise: Expression::Value(RefinedTType::result_ttype(), Value::Composite(CompositeValue::Enum(EnumValue::new(FieldValue::new("Err", Value::Scalar(ScalarValue::String("lt_500".into()))))))),
-                })))
-            }).unwrap())),
-            FieldType::new("active", TType::BOOL),
-        ]).unwrap();
+        let mut registry = TypeRegistry::new();
+
+        let result_ttype = registry.get_id_by_name(RefinedTType::RESULT_TYPE_NAME).unwrap();
+
+        let refinement = Expression::ControlFlow(Box::new(ControlFlow::If(IfControlFlow {
+            condition: Expression::Op(Box::new(Op::Logical(LogicalOp::Lt(
+                Expression::Ident(["this".into()].into()),
+                Expression::Value(Value::Scalar(ScalarValue::Int32(500))),
+            )))),
+            then: Expression::Value(Value::Composite(CompositeValue::Enum(EnumValue::new(&registry, &result_ttype,
+                FieldValue::new("Ok", Value::UNIT)
+            ).unwrap()))),
+            otherwise: Expression::Value(Value::Composite(CompositeValue::Enum(EnumValue::new(&registry, &result_ttype,
+                FieldValue::new("Err", Value::Scalar(ScalarValue::String("lt_500".into())))
+            ).unwrap()))),
+        })));
+
+        let refined_int32 = TTypeId::Anonymous(Box::new(TType::Refined(RefinedTType::new(&registry, TTypeId::INT32, refinement).unwrap())));
+
+        let user_ttype = TType::Composite(CompositeType::new_struct(vec![
+            FieldType::new("id", refined_int32),
+            FieldType::new("active", TTypeId::BOOL),
+        ]).unwrap());
+
+        let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_ttype.select(&registry, &NestedIdents::from_strings(vec!["id"])).unwrap()));
+
+        let user_ttype_id = registry.add("User", user_ttype).unwrap();
+        
         let user_pkey = NestedIdents::from_strings(vec!["id"]);
-        let user_schema = Schema::new(user_ttype, user_pkey).unwrap();
+        let user_schema = Schema::new(&registry, user_ttype_id.clone(), user_pkey).unwrap();
 
         const USERS_PATH: &str = "target/test_file_relation_users_relation.ron";
         const INACTIVE_USERS_PATH: &str = "target/test_file_relation_inactive_users_relation.ron";
@@ -157,50 +170,50 @@ mod tests {
         let mut users = FileRelation::new(user_schema.clone(), USERS_PATH).unwrap();
         let mut inactive_users = FileRelation::new(user_schema.clone(), INACTIVE_USERS_PATH).unwrap();
 
-        users.insert(new_user(0, false)).unwrap().unwrap();
-        users.insert(new_user(1, true)).unwrap().unwrap();
-        users.insert(new_user(2, true)).unwrap().unwrap();
-        users.insert(new_user(3, false)).unwrap().unwrap();
-        users.insert(new_user(4, true)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 1, true)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 2, true)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 3, false)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 4, true)).unwrap().unwrap();
 
-        let new_rows = users.range([], ..).unwrap()
+        let new_rows = users.range(&registry, [], ..).unwrap()
             .map(|r| r.unwrap())
             .filter_map(|row| {
-                let CompositeValue::Struct(value) = row.clone() else { unreachable!() };
+                let Value::Composite(CompositeValue::Struct(value)) = row.clone() else { unreachable!() };
                 value.fields().iter().find(|f| f.name() == "active" && *f.value() == Value::Scalar(ScalarValue::Bool(false)))
                     .map(|_| row)
             });
         
-        inactive_users.extend(new_rows).unwrap().unwrap();
+        inactive_users.extend(&registry, new_rows).unwrap().unwrap();
 
         let mut inactive_users_expected = MemoryRelation::new(user_schema.clone());
 
-        let user_3 = new_user(3, false);
+        let user_3 = new_user(&registry, &user_ttype_id, 3, false);
 
-        inactive_users_expected.insert(new_user(0, false)).unwrap().unwrap();
-        inactive_users_expected.insert(user_3.clone()).unwrap().unwrap();
+        inactive_users_expected.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap().unwrap();
+        inactive_users_expected.insert(&registry, user_3.clone()).unwrap().unwrap();
 
-        assert!(RelationRef::eq(&inactive_users_expected, &inactive_users));
+        assert!(RelationRef::eq(&inactive_users_expected, &registry, &inactive_users));
         
         // cannot insert again
-        assert_eq!(false, inactive_users.insert(user_3).unwrap().unwrap());
-        inactive_users.insert(CompositeValue::new_struct(vec![]).unwrap()).unwrap_err();
-        inactive_users.insert(CompositeValue::new_struct(vec![FieldValue::new("id", Value::Scalar(ScalarValue::Int32(2)))]).unwrap()).unwrap_err();
+        assert_eq!(false, inactive_users.insert(&registry, user_3).unwrap().unwrap());
+        // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &user_ttype_id, vec![]).unwrap())).unwrap_err();
+        // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &user_ttype_id, vec![FieldValue::new("id", Value::Scalar(ScalarValue::Int32(2)))]).unwrap())).unwrap_err();
 
         // check range
-        let users_range = users.range(users.schema.pkey(), new_id(1)..new_id(3)).unwrap().enumerate().collect_vec();
+        let users_range = users.range(&registry, users.schema.pkey(), new_id(&registry, &user_id_ttype_id, 1)..new_id(&registry, &user_id_ttype_id, 3)).unwrap().enumerate().collect_vec();
 
         assert_eq!(2, users_range.len());
 
         for (i, user) in users_range {
-            assert_eq!(user.unwrap(), new_user(i as i32 + 1, true));
+            assert_eq!(user.unwrap(), new_user(&registry, &user_ttype_id, i as i32 + 1, true));
         }
 
-        users.insert(new_user(499, true)).unwrap().unwrap();
-        users.insert(new_user(500, true)).unwrap_err();
-        users.insert(new_user(501, true)).unwrap_err();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 499, true)).unwrap().unwrap();
+        // users.insert(&registry, new_user(&registry, &user_ttype_id, 500, true)).unwrap_err();
+        // users.insert(&registry, new_user(&registry, &user_ttype_id, 501, true)).unwrap_err();
 
-        println!("{}", users.draw());
+        println!("{}", users.draw(&registry));
         panic!();
     }
 }

@@ -1,11 +1,11 @@
 use std::fmt::{Debug, Display};
 
-use crate::typesystem::{ttype::{CompositeType, ScalarType, StructType, TType}, value::{CompositeValue, ScalarValue, StructValue, Value}, TypeError};
+use crate::typesystem::{registry::TypeRegistry, ttype::{CompositeType, ScalarType, StructType, TType}, value::{CompositeValue, ScalarValue, StructValue, Value}, TypeError};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Expression {
     Ident(Box<[String]>),
-    Value(TType, Value),
+    Value(Value),
     Op(Box<Op>),
     ControlFlow(Box<ControlFlow>),
 }
@@ -14,7 +14,7 @@ impl Debug for Expression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ident(idents) => Display::fmt(&idents.join("."), f),
-            Self::Value(_ttype, value) => Debug::fmt(value, f),
+            Self::Value(value) => Debug::fmt(value, f),
             Self::Op(op) => Debug::fmt(op, f),
             Self::ControlFlow(cf) => Debug::fmt(cf, f)
         }
@@ -22,22 +22,22 @@ impl Debug for Expression {
 }
 
 impl Expression {
-    pub fn eval_types(&self, variables: &StructType) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &TypeRegistry, variables: &StructType) -> Result<TType, TypeError> {
         match self {
             Expression::Ident(idents) => {
                 let mut ttype = TType::Composite(CompositeType::Struct(variables.clone()));
                 for ident in idents {
-                    ttype = ttype.dot(ident)?;
+                    ttype = ttype.dot(registry, ident)?;
                 }
                 Ok(ttype)
             },
-            Expression::Value(ttype, _value) => Ok(ttype.clone()),
-            Expression::Op(op) => op.eval_types(variables),
-            Expression::ControlFlow(control_flow) => control_flow.eval_types(variables),
+            Expression::Value(value) => Ok(registry.get_by_id(&value.ttype_id())?),
+            Expression::Op(op) => op.eval_types(registry, variables),
+            Expression::ControlFlow(control_flow) => control_flow.eval_types(registry, variables),
         }
     }
 
-    pub fn eval(&self, variables: &StructValue) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &TypeRegistry, variables: &StructValue) -> Result<Value, ExprError> {
         match self {
             Expression::Ident(idents) => {
                 if idents.is_empty() {
@@ -52,9 +52,9 @@ impl Expression {
 
                 Ok(value_selected)
             },
-            Expression::Value(_ttype, value) => Ok(value.clone()),
-            Expression::Op(op) => op.eval(variables),
-            Expression::ControlFlow(cf) => cf.eval(variables),
+            Expression::Value(value) => Ok(value.clone()),
+            Expression::Op(op) => op.eval(registry, variables),
+            Expression::ControlFlow(cf) => cf.eval(registry, variables),
         }
     }
 }
@@ -75,17 +75,17 @@ impl Debug for Op {
 }
 
 impl Op {
-    pub fn eval_types(&self, variables: &StructType) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &TypeRegistry, variables: &StructType) -> Result<TType, TypeError> {
         match self {
-            Op::Logical(op) => op.eval_types(variables),
-            Op::Arithmetic(op) => op.eval_types(variables),
+            Op::Logical(op) => op.eval_types(registry, variables),
+            Op::Arithmetic(op) => op.eval_types(registry, variables),
         }
     }
     
-    pub fn eval(&self, variables: &StructValue) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &TypeRegistry, variables: &StructValue) -> Result<Value, ExprError> {
         match self {
-            Op::Logical(op) => op.eval(variables),
-            Op::Arithmetic(op) => op.eval(variables),
+            Op::Logical(op) => op.eval(registry, variables),
+            Op::Arithmetic(op) => op.eval(registry, variables),
         }
     }
 }
@@ -118,16 +118,16 @@ impl Debug for LogicalOp {
 }
 
 impl LogicalOp {
-    pub fn eval_types(&self, variables: &StructType) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &TypeRegistry, variables: &StructType) -> Result<TType, TypeError> {
         match self {
             LogicalOp::And(left, right) |
             LogicalOp::Or(left, right) => {
-                let left_type = left.eval_types(variables)?;
+                let left_type = left.eval_types(registry, variables)?;
                 if TType::BOOL != left_type {
                     return Err(TypeError::TypeInvalid { expected: TType::BOOL, got: left_type });
                 }
                 
-                let right_type = right.eval_types(variables)?;
+                let right_type = right.eval_types(registry, variables)?;
                 if TType::BOOL != right_type {
                     return Err(TypeError::TypeInvalid { expected: TType::BOOL, got: right_type });
                 }
@@ -138,21 +138,21 @@ impl LogicalOp {
             LogicalOp::Gt(left, right) |
             LogicalOp::Lte(left, right) |
             LogicalOp::Gte(left, right) => {
-                let left_type = left.eval_types(variables)?;
+                let left_type = left.eval_types(registry, variables)?;
                 if TType::INT32 != left_type {
                     return Err(TypeError::TypeInvalid { expected: TType::INT32, got: left_type });
                 }
                 
-                let right_type = right.eval_types(variables)?;
+                let right_type = right.eval_types(registry, variables)?;
                 if TType::INT32 != right_type {
                     return Err(TypeError::TypeInvalid { expected: TType::INT32, got: right_type });
                 }
 
                 Ok(TType::BOOL)
             },
-            LogicalOp::Eq(left, right) => Ok(TType::BOOL),
+            LogicalOp::Eq(_left, _right) => Ok(TType::BOOL),
             LogicalOp::Not(expr) => {
-                let expr_ttype = expr.eval_types(variables)?;
+                let expr_ttype = expr.eval_types(registry, variables)?;
                 if TType::BOOL != expr_ttype {
                     return Err(TypeError::TypeInvalid { expected: TType::BOOL, got: expr_ttype });
                 }
@@ -162,72 +162,72 @@ impl LogicalOp {
         }
     }
 
-    pub fn eval(&self, variables: &StructValue) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &TypeRegistry, variables: &StructValue) -> Result<Value, ExprError> {
         match self {
             LogicalOp::And(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
                 
-                TType::Scalar(ScalarType::Bool).check(&left)?;
-                TType::Scalar(ScalarType::Bool).check(&right)?;
+                TType::Scalar(ScalarType::Bool).check(registry, &left)?;
+                TType::Scalar(ScalarType::Bool).check(registry, &right)?;
                 
                 Ok(Value::Scalar(ScalarValue::Bool(left == Value::TRUE && right == Value::TRUE)))
             },
             LogicalOp::Or(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
                 
-                TType::Scalar(ScalarType::Bool).check(&left)?;
-                TType::Scalar(ScalarType::Bool).check(&right)?;
+                TType::Scalar(ScalarType::Bool).check(registry, &left)?;
+                TType::Scalar(ScalarType::Bool).check(registry, &right)?;
                 
                 Ok(Value::Scalar(ScalarValue::Bool(left == Value::TRUE || right == Value::TRUE)))
             },
             LogicalOp::Not(expr) => {
-                let value = expr.eval(variables)?;
+                let value = expr.eval(registry, variables)?;
                 
-                TType::Scalar(ScalarType::Bool).check(&value)?;
+                TType::Scalar(ScalarType::Bool).check(registry, &value)?;
                 
                 Ok(Value::Scalar(ScalarValue::Bool(value == Value::FALSE)))
             },
             LogicalOp::Eq(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
                 
                 Ok(Value::Scalar(ScalarValue::Bool(left == right)))
             },
             LogicalOp::Lt(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
 
-                TType::Scalar(ScalarType::Int32).check(&left)?;
-                TType::Scalar(ScalarType::Int32).check(&right)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &left)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &right)?;
                 
                 Ok(Value::Scalar(ScalarValue::Bool(left < right)))
             },
             LogicalOp::Gt(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
 
-                TType::Scalar(ScalarType::Int32).check(&left)?;
-                TType::Scalar(ScalarType::Int32).check(&right)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &left)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &right)?;
                 
                 Ok(Value::Scalar(ScalarValue::Bool(left > right)))
             },
             LogicalOp::Lte(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
 
-                TType::Scalar(ScalarType::Int32).check(&left)?;
-                TType::Scalar(ScalarType::Int32).check(&right)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &left)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &right)?;
                 
                 Ok(Value::Scalar(ScalarValue::Bool(left <= right)))
             },
             LogicalOp::Gte(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
 
-                TType::Scalar(ScalarType::Int32).check(&left)?;
-                TType::Scalar(ScalarType::Int32).check(&right)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &left)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &right)?;
                 
                 Ok(Value::Scalar(ScalarValue::Bool(left >= right)))
             },
@@ -255,14 +255,14 @@ impl Debug for ArithmeticOp {
 }
 
 impl ArithmeticOp {
-    pub fn eval_types(&self, variables: &StructType) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &TypeRegistry, variables: &StructType) -> Result<TType, TypeError> {
         match self {
             ArithmeticOp::Add(left, right) |
             ArithmeticOp::Sub(left, right) |
             ArithmeticOp::Mul(left, right) |
             ArithmeticOp::Div(left, right) => {
-                let left_type = left.eval_types(variables)?;
-                let right_type = right.eval_types(variables)?;
+                let left_type = left.eval_types(registry, variables)?;
+                let right_type = right.eval_types(registry, variables)?;
 
                 if TType::INT32 != left_type {
                     return Err(TypeError::TypeInvalid { expected: TType::INT32, got: left_type });
@@ -276,14 +276,14 @@ impl ArithmeticOp {
         }
     }
 
-    pub fn eval(&self, variables: &StructValue) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &TypeRegistry, variables: &StructValue) -> Result<Value, ExprError> {
         match self {
             ArithmeticOp::Add(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
 
-                TType::Scalar(ScalarType::Int32).check(&left)?;
-                TType::Scalar(ScalarType::Int32).check(&right)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &left)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &right)?;
 
                 let Value::Scalar(ScalarValue::Int32(left)) = left else { unreachable!() };
                 let Value::Scalar(ScalarValue::Int32(right)) = right else { unreachable!() };
@@ -291,11 +291,11 @@ impl ArithmeticOp {
                 Ok(Value::Scalar(ScalarValue::Int32(left + right)))
             },
             ArithmeticOp::Sub(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
 
-                TType::Scalar(ScalarType::Int32).check(&left)?;
-                TType::Scalar(ScalarType::Int32).check(&right)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &left)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &right)?;
 
                 let Value::Scalar(ScalarValue::Int32(left)) = left else { unreachable!() };
                 let Value::Scalar(ScalarValue::Int32(right)) = right else { unreachable!() };
@@ -303,11 +303,11 @@ impl ArithmeticOp {
                 Ok(Value::Scalar(ScalarValue::Int32(left - right)))
             },
             ArithmeticOp::Mul(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
 
-                TType::Scalar(ScalarType::Int32).check(&left)?;
-                TType::Scalar(ScalarType::Int32).check(&right)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &left)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &right)?;
 
                 let Value::Scalar(ScalarValue::Int32(left)) = left else { unreachable!() };
                 let Value::Scalar(ScalarValue::Int32(right)) = right else { unreachable!() };
@@ -315,11 +315,11 @@ impl ArithmeticOp {
                 Ok(Value::Scalar(ScalarValue::Int32(left * right)))
             },
             ArithmeticOp::Div(left, right) => {
-                let left = left.eval(variables)?;
-                let right = right.eval(variables)?;
+                let left = left.eval(registry, variables)?;
+                let right = right.eval(registry, variables)?;
 
-                TType::Scalar(ScalarType::Int32).check(&left)?;
-                TType::Scalar(ScalarType::Int32).check(&right)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &left)?;
+                TType::Scalar(ScalarType::Int32).check(registry, &right)?;
 
                 let Value::Scalar(ScalarValue::Int32(left)) = left else { unreachable!() };
                 let Value::Scalar(ScalarValue::Int32(right)) = right else { unreachable!() };
@@ -354,22 +354,21 @@ impl Debug for ControlFlow {
 }
 
 impl ControlFlow {
-    pub fn eval_types(&self, variables: &StructType) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &TypeRegistry, variables: &StructType) -> Result<TType, TypeError> {
         match self {
-            ControlFlow::If(cf) => cf.eval_types(variables),
+            ControlFlow::If(cf) => cf.eval_types(registry, variables),
         }
     }
 
-    pub fn eval(&self, variables: &StructValue) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &TypeRegistry, variables: &StructValue) -> Result<Value, ExprError> {
         match self {
-            ControlFlow::If(cf) => cf.eval(variables),
+            ControlFlow::If(cf) => cf.eval(registry, variables),
         }
     }
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct IfControlFlow {
-    pub ret_ttype: TType,
     pub condition: Expression,
     pub then: Expression,
     pub otherwise: Expression,
@@ -382,35 +381,32 @@ impl Debug for IfControlFlow {
 }
 
 impl IfControlFlow {
-    pub fn eval_types(&self, variables: &StructType) -> Result<TType, TypeError> {
-        let cond_type = self.condition.eval_types(variables)?;
+    pub fn eval_types(&self, registry: &TypeRegistry, variables: &StructType) -> Result<TType, TypeError> {
+        let cond_type = self.condition.eval_types(registry, variables)?;
 
         if TType::BOOL != cond_type {
             return Err(TypeError::TypeInvalid { expected: TType::BOOL, got: cond_type });
         }
         
-        let then_type = self.then.eval_types(variables)?;
-        let otherwise_type = self.then.eval_types(variables)?;
+        let then_type = self.then.eval_types(registry, variables)?;
+        let otherwise_type = self.then.eval_types(registry, variables)?;
 
-        if self.ret_ttype != then_type {
-            return Err(TypeError::TypeInvalid { expected: self.ret_ttype.clone(), got: then_type });
-        }
-        if self.ret_ttype != otherwise_type {
-            return Err(TypeError::TypeInvalid { expected: self.ret_ttype.clone(), got: otherwise_type });
+        if then_type != otherwise_type {
+            return Err(TypeError::TypeInvalid { expected: then_type, got: otherwise_type });
         }
 
-        Ok(self.ret_ttype.clone())
+        Ok(then_type)
     }
 
-    pub fn eval(&self, variables: &StructValue) -> Result<Value, ExprError> {
-        let cond_value = self.condition.eval(variables)?;
+    pub fn eval(&self, registry: &TypeRegistry, variables: &StructValue) -> Result<Value, ExprError> {
+        let cond_value = self.condition.eval(registry, variables)?;
 
-        TType::BOOL.check(&cond_value)?;
+        TType::BOOL.check(registry, &cond_value)?;
 
         if cond_value == Value::TRUE {
-            self.then.eval(variables)
+            self.then.eval(registry, variables)
         } else {
-            self.otherwise.eval(variables)
+            self.otherwise.eval(registry, variables)
         }
     }
 }

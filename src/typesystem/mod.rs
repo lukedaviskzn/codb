@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Display};
 
 use itertools::Itertools;
+use registry::{TypeRegistry, TypeRegistryError};
 use ttype::TType;
 use value::Value;
 
@@ -38,6 +39,8 @@ pub enum TypeError {
     DuplicateField(#[from] DuplicateField),
     #[error("refinement failed: {0}")]
     RefinementFailed(#[from] RefinementFailedError),
+    #[error("{0}")]
+    TypeRegistryError(#[from] TypeRegistryError),
 }
 
 #[derive(Debug, thiserror::Error)]
