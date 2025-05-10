@@ -1,6 +1,6 @@
 use std::{io, ops::RangeBounds};
 
-use crate::typesystem::{registry::{TTypeId, TypeRegistry, TypeRegistryError}, ttype::TType, value::Value, NestedIdents, TypeError};
+use crate::{idents::IdentTree, typesystem::{registry::{TTypeId, TypeRegistry, TypeRegistryError}, ttype::TType, value::Value, TypeError}};
 
 mod memory;
 mod file;
@@ -11,7 +11,7 @@ pub type RowSize = u64;
 
 pub trait RelationRef {
     fn schema(&self) -> &Schema;
-    fn range(&self, registry: &TypeRegistry, nested_idents: impl Into<Box<[NestedIdents]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError>;
+    fn range(&self, registry: &TypeRegistry, ident_trees: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError>;
     
     #[cfg(test)]
     fn eq(&self, registry: &TypeRegistry, other: &impl RelationRef) -> bool {
@@ -59,7 +59,9 @@ pub trait Relation: RelationRef {
     fn extend(&mut self, registry: &TypeRegistry, new_rows: impl IntoIterator<Item = Row>) -> Result<io::Result<RowSize>, TypeError> {
         let mut count = 0;
         for new_row in new_rows {
-            self.insert(registry, new_row)?;
+            if let Err(err) = self.insert(registry, new_row)? {
+                return Ok(Err(err));
+            }
             count += 1;
         }
         Ok(Ok(count))
@@ -80,11 +82,11 @@ pub enum SchemaError {
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Schema {
     ttype_id: TTypeId,
-    pkey: Box<[NestedIdents]>,
+    pkey: Box<[IdentTree]>,
 }
 
 impl Schema {
-    pub fn new(registry: &TypeRegistry, ttype_id: TTypeId, pkey: Box<[NestedIdents]>) -> Result<Schema, SchemaError> {
+    pub fn new(registry: &TypeRegistry, ttype_id: TTypeId, pkey: Box<[IdentTree]>) -> Result<Schema, SchemaError> {
         registry.get_by_id(&ttype_id)?.select(registry, &pkey).map_err(|err| SchemaError::PrimaryKeyInvalid(err))?;
 
         Ok(Schema {
@@ -101,7 +103,7 @@ impl Schema {
         Ok(registry.get_by_id(&self.ttype_id)?.select(registry, &self.pkey).expect("invalid primary key idents"))
     }
 
-    pub fn pkey(&self) -> &[NestedIdents] {
+    pub fn pkey(&self) -> &[IdentTree] {
         &self.pkey
     }
 }

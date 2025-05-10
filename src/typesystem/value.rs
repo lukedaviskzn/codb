@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display};
 
 use itertools::Itertools;
 
-use crate::typesystem::{registry::{TTypeId, TypeRegistry}, ttype::{CompositeType, ScalarType, TType}, DuplicateField, NestedIdents, TypeError};
+use crate::{idents::{Ident, IdentTree}, typesystem::{registry::{TTypeId, TypeRegistry}, ttype::ScalarType, DuplicateField, TypeError}};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Value {
@@ -22,17 +22,17 @@ impl Value {
         }
     }
 
-    pub fn select(&self, registry: &TypeRegistry, idents: &[NestedIdents]) -> Result<Value, TypeError> {
+    pub fn select(&self, registry: &TypeRegistry, ident_trees: &[IdentTree]) -> Result<Value, TypeError> {
         match self {
-            Value::Composite(value) => Ok(Value::Composite(value.select(registry, idents)?)),
-            Value::Scalar(value) => Ok(Value::Scalar(value.select(idents)?)),
+            Value::Composite(value) => Ok(Value::Composite(value.select(registry, ident_trees)?)),
+            Value::Scalar(value) => Ok(Value::Scalar(value.select(ident_trees)?)),
         }
     }
 
-    pub fn dot(&self, ident: &str) -> Result<Value, TypeError> {
+    pub fn dot(&self, ident: &Ident) -> Result<Value, TypeError> {
         match self {
             Value::Composite(value) => value.dot(ident),
-            Value::Scalar(_) => Err(TypeError::ScalarField(ident.into())),
+            Value::Scalar(_) => Err(TypeError::ScalarField(ident.clone())),
         }
     }
 }
@@ -53,7 +53,7 @@ pub enum CompositeValue {
 }
 
 impl CompositeValue {
-    pub fn new_struct(registry: &TypeRegistry, ttype_id: &TTypeId, fields: Vec<FieldValue>) -> Result<CompositeValue, TypeError> {
+    pub fn new_struct(registry: &TypeRegistry, ttype_id: &TTypeId, fields: impl Into<Vec<FieldValue>>) -> Result<CompositeValue, TypeError> {
         Ok(CompositeValue::Struct(StructValue::new(registry, ttype_id, fields)?))
     }
 
@@ -68,17 +68,17 @@ impl CompositeValue {
         }
     }
 
-    pub fn select(&self, registry: &TypeRegistry, idents: &[NestedIdents]) -> Result<CompositeValue, TypeError> {
+    pub fn select(&self, registry: &TypeRegistry, ident_trees: &[IdentTree]) -> Result<CompositeValue, TypeError> {
         match self {
-            CompositeValue::Struct(value) => Ok(CompositeValue::Struct(value.select(registry, idents)?)),
-            CompositeValue::Enum(value) => Ok(CompositeValue::Enum(value.select(idents)?)),
+            CompositeValue::Struct(value) => Ok(CompositeValue::Struct(value.select(registry, ident_trees)?)),
+            CompositeValue::Enum(value) => Ok(CompositeValue::Enum(value.select(ident_trees)?)),
         }
     }
 
-    pub fn dot(&self, ident: &str) -> Result<Value, TypeError> {
+    pub fn dot(&self, ident: &Ident) -> Result<Value, TypeError> {
         match self {
             CompositeValue::Struct(value) => value.dot(ident),
-            CompositeValue::Enum(_) => Err(TypeError::DotTag(ident.into())),
+            CompositeValue::Enum(_) => Err(TypeError::DotTag(ident.clone())),
         }
     }
 }
@@ -117,7 +117,9 @@ impl PartialOrd for StructValue {
 }
 
 impl StructValue {
-    pub fn new(registry: &TypeRegistry, ttype_id: &TTypeId, fields: Vec<FieldValue>) -> Result<StructValue, TypeError> {
+    pub fn new(registry: &TypeRegistry, ttype_id: &TTypeId, fields: impl Into<Vec<FieldValue>>) -> Result<StructValue, TypeError> {
+        let fields: Vec<FieldValue> = fields.into();
+
         if let Some(_) = fields.iter().duplicates_by(|f| &f.name).next() {
             Err(DuplicateField.into())
         } else {
@@ -142,27 +144,27 @@ impl StructValue {
         self.ttype_id.clone()
     }
 
-    pub fn select(&self, registry: &TypeRegistry, idents: &[NestedIdents]) -> Result<StructValue, TypeError> {
-        if idents.is_empty() {
+    pub fn select(&self, registry: &TypeRegistry, ident_trees: &[IdentTree]) -> Result<StructValue, TypeError> {
+        if ident_trees.is_empty() {
             return Ok(self.clone());
         }
 
         let mut new_fields = Vec::new();
         
-        for ident in idents {
-            if let Some(field) = self.fields.iter().find(|f| f.name == ident.ident) {
+        for ident in ident_trees {
+            if let Some(field) = self.fields.iter().find(|f| &f.name == ident.ident()) {
                 let new_field = FieldValue {
                     name: field.name.clone(),
-                    value: field.value.select(registry, &ident.children)?,
+                    value: field.value.select(registry, ident.children())?,
                 };
                 new_fields.push(new_field);
             } else {
-                return Err(TypeError::UnknownField(ident.ident.clone()));
+                return Err(TypeError::UnknownField(ident.ident().clone()));
             }
         }
 
         let selection_ttype = registry.get_by_id(&self.ttype_id)?
-            .select(registry, idents)?;
+            .select(registry, ident_trees)?;
         
         Ok(StructValue {
             ttype_id: TTypeId::Anonymous(Box::new(selection_ttype)),
@@ -170,11 +172,11 @@ impl StructValue {
         })
     }
 
-    pub fn dot(&self, ident: &str) -> Result<Value, TypeError> {
+    pub fn dot(&self, ident: &Ident) -> Result<Value, TypeError> {
         if let Some(field) = self.fields.iter().find(|f| &f.name == ident) {
             Ok(field.value.clone())
         } else {
-            Err(TypeError::UnknownField(ident.into()))
+            Err(TypeError::UnknownField(ident.clone()))
         }
     }
 }
@@ -231,20 +233,20 @@ impl EnumValue {
         self.ttype_id.clone()
     }
 
-    pub fn select(&self, idents: &[NestedIdents]) -> Result<EnumValue, TypeError> {
-        if idents.is_empty() {
+    pub fn select(&self, ident_trees: &[IdentTree]) -> Result<EnumValue, TypeError> {
+        if ident_trees.is_empty() {
             return Ok(self.clone());
         }
 
         // tag must be listed
-        if idents.iter().all(|ident| ident.ident != self.tag.name) {
+        if ident_trees.iter().all(|ident| ident.ident() != &self.tag.name) {
             return Err(TypeError::MissingTag(self.tag.name.clone()));
         }
 
         // all idents must be valid
-        for ident in idents {
-            if self.tag.name != ident.ident {
-                return Err(TypeError::UnknownTag(ident.ident.clone()));
+        for ident in ident_trees {
+            if &self.tag.name != ident.ident() {
+                return Err(TypeError::UnknownTag(ident.ident().clone()));
             }
         }
 
@@ -262,19 +264,19 @@ impl Debug for EnumValue {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FieldValue {
-    name: String,
+    name: Ident,
     value: Value,
 }
 
 impl FieldValue {
-    pub fn new(name: impl Into<String>, value: Value) -> FieldValue {
+    pub fn new(name: Ident, value: Value) -> FieldValue {
         FieldValue {
             name: name.into(),
             value,
         }
     }
 
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &Ident {
         &self.name
     }
 
@@ -305,9 +307,9 @@ impl ScalarValue {
         }
     }
 
-    pub fn select(&self, idents: &[NestedIdents]) -> Result<ScalarValue, TypeError> {
-        if let Some(first) = idents.first() {
-            Err(TypeError::ScalarField(first.ident.clone()))
+    pub fn select(&self, ident_trees: &[IdentTree]) -> Result<ScalarValue, TypeError> {
+        if let Some(first) = ident_trees.first() {
+            Err(TypeError::ScalarField(first.ident().clone()))
         } else {
             Ok(self.clone())
         }

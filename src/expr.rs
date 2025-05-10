@@ -1,10 +1,10 @@
 use std::fmt::{Debug, Display};
 
-use crate::typesystem::{registry::TypeRegistry, ttype::{CompositeType, ScalarType, StructType, TType}, value::{CompositeValue, ScalarValue, StructValue, Value}, TypeError};
+use crate::{idents::NestedIdent, typesystem::{registry::TypeRegistry, ttype::{CompositeType, ScalarType, StructType, TType}, value::{CompositeValue, ScalarValue, StructValue, Value}, TypeError}};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Expression {
-    Ident(Box<[String]>),
+    NestedIdent(NestedIdent),
     Value(Value),
     Op(Box<Op>),
     ControlFlow(Box<ControlFlow>),
@@ -13,7 +13,7 @@ pub enum Expression {
 impl Debug for Expression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Ident(idents) => Display::fmt(&idents.join("."), f),
+            Self::NestedIdent(nested_idents) => Display::fmt(&nested_idents.join("."), f),
             Self::Value(value) => Debug::fmt(value, f),
             Self::Op(op) => Debug::fmt(op, f),
             Self::ControlFlow(cf) => Debug::fmt(cf, f)
@@ -24,9 +24,9 @@ impl Debug for Expression {
 impl Expression {
     pub fn eval_types(&self, registry: &TypeRegistry, variables: &StructType) -> Result<TType, TypeError> {
         match self {
-            Expression::Ident(idents) => {
+            Expression::NestedIdent(nested_idents) => {
                 let mut ttype = TType::Composite(CompositeType::Struct(variables.clone()));
-                for ident in idents {
+                for ident in nested_idents {
                     ttype = ttype.dot(registry, ident)?;
                 }
                 Ok(ttype)
@@ -39,14 +39,14 @@ impl Expression {
 
     pub fn eval(&self, registry: &TypeRegistry, variables: &StructValue) -> Result<Value, ExprError> {
         match self {
-            Expression::Ident(idents) => {
-                if idents.is_empty() {
-                    return Err(ExprError::InvalidIdents(idents.clone()));
+            Expression::NestedIdent(nested_idents) => {
+                if nested_idents.is_empty() {
+                    return Err(ExprError::InvalidNestedIdent(nested_idents.clone()));
                 }
 
                 let mut value_selected = Value::Composite(CompositeValue::Struct(variables.clone()));
 
-                for ident in idents {
+                for ident in nested_idents {
                     value_selected = value_selected.dot(ident)?;
                 }
 
@@ -150,7 +150,16 @@ impl LogicalOp {
 
                 Ok(TType::BOOL)
             },
-            LogicalOp::Eq(_left, _right) => Ok(TType::BOOL),
+            LogicalOp::Eq(left, right) => {
+                let left_type = left.eval_types(registry, variables)?;
+                let right_type = right.eval_types(registry, variables)?;
+
+                if left_type != right_type {
+                    return Err(TypeError::TypeInvalid { expected: left_type, got: right_type });
+                }
+
+                Ok(TType::BOOL)
+            },
             LogicalOp::Not(expr) => {
                 let expr_ttype = expr.eval_types(registry, variables)?;
                 if TType::BOOL != expr_ttype {
@@ -192,6 +201,13 @@ impl LogicalOp {
             LogicalOp::Eq(left, right) => {
                 let left = left.eval(registry, variables)?;
                 let right = right.eval(registry, variables)?;
+
+                if left.ttype_id() != right.ttype_id() {
+                    return Err(TypeError::TypeInvalid {
+                        expected: registry.get_by_id(&left.ttype_id()).map_err(|err| TypeError::from(err))?,
+                        got: registry.get_by_id(&right.ttype_id()).map_err(|err| TypeError::from(err))?,
+                    }.into());
+                }
                 
                 Ok(Value::Scalar(ScalarValue::Bool(left == right)))
             },
@@ -335,7 +351,7 @@ pub enum ExprError {
     #[error("variable not found {0:?}")]
     VariableNotFound(String),
     #[error("invalid ident {:?}", .0.join("."))]
-    InvalidIdents(Box<[String]>),
+    InvalidNestedIdent(NestedIdent),
     #[error("{0}")]
     TTypeError(#[from] TypeError),
 }
