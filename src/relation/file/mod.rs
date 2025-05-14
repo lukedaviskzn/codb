@@ -114,55 +114,62 @@ impl Relation for FileRelation {
 mod tests {
     use itertools::Itertools;
 
-    use crate::{expr::{ControlFlow, Expression, IfControlFlow, LogicalOp, Op}, typesystem::{registry::TTypeId, ttype::{CompositeType, FieldType, RefinedType, TType}, value::{CompositeValue, EnumValue, FieldValue, ScalarValue, Value}}};
+    use crate::{expr::{ControlFlow, Expression, IfControlFlow, LogicalOp, Op}, typesystem::{registry::TTypeId, ttype::{RefinedType, StructType, TType}, value::{CompositeValue, EnumValue, ScalarValue, ScalarValueInner, StructValue, Value}}};
 
     use super::*;
 
     #[test]
     fn file_relation() {
         fn new_user(registry: &TypeRegistry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
-            Value::Composite(CompositeValue::new_struct(registry, user_ttype_id, [
-                FieldValue::new("id".parse().unwrap(), Value::Scalar(ScalarValue::Int32(id))),
-                FieldValue::new("active".parse().unwrap(), Value::Scalar(ScalarValue::Bool(active))),
-            ]).unwrap())
+            StructValue::new(registry, user_ttype_id.clone(), btreemap! {
+                "id".parse().unwrap() => ScalarValue::new(registry, TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
+                "active".parse().unwrap() => ScalarValueInner::Bool(active).into(),
+            }).unwrap().into()
         }
 
         fn new_id(registry: &TypeRegistry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
-            Value::Composite(CompositeValue::new_struct(registry, user_id_ttype_id, [
-                FieldValue::new("id".parse().unwrap(), Value::Scalar(ScalarValue::Int32(id))),
-            ]).unwrap())
+            StructValue::new(registry, user_id_ttype_id.clone(), btreemap! {
+                "id".parse().unwrap() => ScalarValue::new(registry, TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
+            }).unwrap().into()
         }
 
-        let mut registry = TypeRegistry::new();
+        let registry = TypeRegistry::new();
 
-        let result_ttype = registry.get_id_by_name(RefinedType::RESULT_TYPE_NAME).unwrap();
+        // let result_ttype = registry.get_id_by_name(RefinedType::RESULT_TYPE_NAME).unwrap();
 
-        let refinement = Expression::ControlFlow(Box::new(ControlFlow::If(IfControlFlow {
-            condition: Expression::Op(Box::new(Op::Logical(LogicalOp::Lt(
-                Expression::NestedIdent("this".parse().unwrap()),
-                Expression::Value(Value::Scalar(ScalarValue::Int32(500))),
-            )))),
-            then: Expression::Value(Value::Composite(CompositeValue::Enum(EnumValue::new(&registry, &result_ttype,
-                FieldValue::new("Ok".parse().unwrap(), Value::UNIT)
-            ).unwrap()))),
-            otherwise: Expression::Value(Value::Composite(CompositeValue::Enum(EnumValue::new(&registry, &result_ttype,
-                FieldValue::new("Err".parse().unwrap(), Value::Scalar(ScalarValue::String("lt_500".into())))
-            ).unwrap()))),
-        })));
+        // let expression = Expression::ControlFlow(Box::new(ControlFlow::If(IfControlFlow {
+        //     condition: Expression::Op(Box::new(Op::Logical(LogicalOp::Lt(
+        //         Expression::NestedIdent("this".parse().unwrap()),
+        //         Expression::Value(Value::Scalar(ScalarValueInner::Int32(500).into())),
+        //     )))),
+        //     then: Expression::Value(EnumValue::new(
+        //         &registry, result_ttype.clone(),
+        //         "Ok".parse().unwrap(),
+        //         Value::UNIT,
+        //     ).unwrap().into()),
+        //     otherwise: Expression::Value(Value::Composite(CompositeValue::Enum(EnumValue::new(
+        //         &registry, result_ttype.clone(),
+        //         "Err".parse().unwrap(),
+        //         Value::Scalar(ScalarValueInner::String("lt_500".into()).into()),
+        //     ).unwrap()))),
+        // })));
 
-        let refined_int32 = TTypeId::Anonymous(Box::new(TType::Refined(RefinedType::new(&registry, TTypeId::INT32, refinement).unwrap())));
+        let user_struct = StructType::new(btreemap! {
+            "id".parse().unwrap() => TTypeId::INT32,
+            "active".parse().unwrap() => TTypeId::BOOL,
+        });
 
-        let user_ttype = TType::Composite(CompositeType::new_struct([
-            FieldType::new("id".parse().unwrap(), refined_int32),
-            FieldType::new("active".parse().unwrap(), TTypeId::BOOL),
-        ]).unwrap());
+        let user_ttype_id = TTypeId::Anonymous(Box::new(user_struct.clone().into()));
 
-        let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_ttype.select(&registry, &IdentTree::from_nested_idents(["id".parse().unwrap()])).unwrap()));
+        let user_id_struct = user_struct.select(
+            &registry,
+            &IdentTree::from_nested_idents(["id".parse().unwrap()])
+        ).unwrap();
 
-        let user_ttype_id = registry.add("User", user_ttype).unwrap();
+        let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_id_struct.clone().into()));
         
         let user_pkey = IdentTree::from_nested_idents(["id".parse().unwrap()]);
-        let user_schema = Schema::new(&registry, user_ttype_id.clone(), user_pkey).unwrap();
+        let user_schema = Schema::new(&registry, user_struct, user_pkey).unwrap();
 
         const USERS_PATH: &str = "target/test_file_relation_users_relation.ron";
         const INACTIVE_USERS_PATH: &str = "target/test_file_relation_inactive_users_relation.ron";
@@ -180,7 +187,9 @@ mod tests {
             .map(|r| r.unwrap())
             .filter_map(|row| {
                 let Value::Composite(CompositeValue::Struct(value)) = row.clone() else { unreachable!() };
-                value.fields().iter().find(|f| f.name() == "active" && *f.value() == Value::Scalar(ScalarValue::Bool(false)))
+
+                value.fields().get("active")
+                    .filter(|value| **value == Value::Scalar(ScalarValueInner::Bool(false).into()))
                     .map(|_| row)
             });
         
@@ -198,7 +207,7 @@ mod tests {
         // cannot insert again
         assert_eq!(false, inactive_users.insert(&registry, user_3).unwrap().unwrap());
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &user_ttype_id, []).unwrap())).unwrap_err();
-        // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &user_ttype_id, [FieldValue::new("id", Value::Scalar(ScalarValue::Int32(2)))]).unwrap())).unwrap_err();
+        // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &user_ttype_id, [FieldValue::new("id", Value::Scalar(ScalarValueInner::Int32(2)))]).unwrap())).unwrap_err();
 
         // check range
         let users_range = users.range(&registry, users.schema.pkey(), new_id(&registry, &user_id_ttype_id, 1)..new_id(&registry, &user_id_ttype_id, 3)).unwrap().enumerate().collect_vec();
@@ -214,6 +223,6 @@ mod tests {
         // users.insert(&registry, new_user(&registry, &user_ttype_id, 501, true)).unwrap_err();
 
         println!("{}", users.draw(&registry));
-        panic!();
+        // panic!();
     }
 }

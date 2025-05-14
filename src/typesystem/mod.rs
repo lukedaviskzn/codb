@@ -1,9 +1,8 @@
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 
-use itertools::Itertools;
 use registry::TypeRegistryError;
 use ttype::TType;
-use value::Value;
+use value::{Value, Literal};
 
 use crate::{expr::ExprError, idents::Ident};
 
@@ -11,7 +10,7 @@ pub mod registry;
 pub mod ttype;
 pub mod value;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TypeError {
     #[error("unknown field '{0}'")]
     UnknownField(Ident),
@@ -30,27 +29,26 @@ pub enum TypeError {
         expected: TType,
         got: Value,
     },
+    #[error("value literal type invalid, expected {expected:?} got {got:?}")]
+    LiteralTypeInvalid {
+        expected: TType,
+        got: Literal,
+    },
     #[error("type invalid, expected {expected:?} got {got:?}")]
     TypeInvalid {
         expected: TType,
         got: TType,
     },
-    #[error("{0}")]
-    DuplicateField(#[from] DuplicateField),
     #[error("refinement failed: {0}")]
     RefinementFailed(#[from] RefinementFailedError),
     #[error("{0}")]
     TypeRegistryError(#[from] TypeRegistryError),
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RefinementFailedError {
     #[error("{0}")]
     Expr(#[from] Box<ExprError>),
     #[error("{0:?}")]
     Refinement(String),
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("duplicate field")]
-pub struct DuplicateField;

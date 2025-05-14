@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, io, ops::{Bound, RangeBounds}};
 
-use crate::{idents::IdentTree, typesystem::{registry::TypeRegistry, value::Value, TypeError}};
+use crate::{idents::IdentTree, typesystem::{registry::{TTypeId, TypeRegistry}, value::Value, TypeError}};
 
 use super::{PKey, Relation, RelationRef, Row, RowSize, Schema};
 
@@ -40,15 +40,26 @@ impl RelationRef for MemoryRelation {
         &self.schema
     }
 
-    fn range(&self, registry: &TypeRegistry, nested_idents: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError> {
-        let idents = Into::<Box<[IdentTree]>>::into(nested_idents);
-        let selected_type = registry.get_by_id(&self.schema.ttype_id)?.select(registry, &idents)?;
+    fn range(&self, registry: &TypeRegistry, ident_trees: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError> {
+        let ident_trees = Into::<Box<[IdentTree]>>::into(ident_trees);
+        let selected_type = self.schema.ttype.select(registry, &ident_trees)?;
 
         if let Bound::Included(bound) | Bound::Excluded(bound) = range.start_bound() {
-            selected_type.check(registry, bound)?;
+            if bound.ttype_id() != TTypeId::Anonymous(Box::new(selected_type.clone().into())) {
+                return Err(TypeError::TypeInvalid {
+                    expected: selected_type.into(),
+                    got: registry.get_by_id(&bound.ttype_id())?,
+                })
+            }
         }
+        
         if let Bound::Included(bound) | Bound::Excluded(bound) = range.end_bound() {
-            selected_type.check(registry, bound)?;
+            if bound.ttype_id() != TTypeId::Anonymous(Box::new(selected_type.clone().into())) {
+                return Err(TypeError::TypeInvalid {
+                    expected: selected_type.into(),
+                    got: registry.get_by_id(&bound.ttype_id())?,
+                })
+            }
         }
 
         if selected_type.eq(&self.schema.pkey_ttype(registry)?) {
@@ -62,7 +73,12 @@ impl RelationRef for MemoryRelation {
 
 impl Relation for MemoryRelation {
     fn insert(&mut self, registry: &TypeRegistry, new_row: Row) -> Result<io::Result<bool>, TypeError> {
-        registry.get_by_id(&self.schema.ttype_id)?.check(registry, &new_row)?;
+        if TTypeId::Anonymous(Box::new(self.schema.ttype.clone().into())) != new_row.ttype_id() {
+            return Err(TypeError::TypeInvalid {
+                expected: self.schema.ttype.clone().into(),
+                got: registry.get_by_id(&new_row.ttype_id())?,
+            });
+        }
 
         let pkey = new_row.select(registry, &self.schema.pkey)?;
         
@@ -75,7 +91,16 @@ impl Relation for MemoryRelation {
     }
 
     fn remove(&mut self, registry: &TypeRegistry, pkey: &PKey) -> Result<io::Result<Option<Row>>, TypeError> {
-        self.schema.pkey_ttype(registry)?.check(registry, pkey)?;
+        let pkey_ttype = self.schema.pkey_ttype(registry)?;
+        let pkey_type_id = TTypeId::Anonymous(Box::new(pkey_ttype.clone().into()));
+
+        if pkey_type_id != pkey.ttype_id() {
+            return Err(TypeError::TypeInvalid {
+                expected: pkey_ttype.into(),
+                got: registry.get_by_id(&pkey.ttype_id())?,
+            })
+        }
+
         Ok(Ok(self.rows.remove(pkey)))
     }
 
@@ -91,38 +116,43 @@ impl Relation for MemoryRelation {
 mod tests {
     use itertools::Itertools;
 
-    use crate::typesystem::{registry::TTypeId, ttype::{CompositeType, FieldType, TType}, value::{CompositeValue, FieldValue, ScalarValue, Value}};
+    use crate::typesystem::{registry::TTypeId, ttype::{StructType, TType}, value::{CompositeValue, ScalarValueInner, StructValue, Value}};
 
     use super::*;
 
     #[test]
     fn memory_relation() {
         fn new_user(registry: &TypeRegistry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
-            Value::Composite(CompositeValue::new_struct(registry, user_ttype_id, vec![
-                FieldValue::new("id".parse().unwrap(), Value::Scalar(ScalarValue::Int32(id))),
-                FieldValue::new("active".parse().unwrap(), Value::Scalar(ScalarValue::Bool(active))),
-            ]).unwrap())
+            StructValue::new(registry, user_ttype_id.clone(), btreemap! {
+                "id".parse().unwrap() => Value::Scalar(ScalarValueInner::Int32(id).into()),
+                "active".parse().unwrap() => Value::Scalar(ScalarValueInner::Bool(active).into()),
+            }).unwrap().into()
         }
 
         fn new_id(registry: &TypeRegistry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
-            Value::Composite(CompositeValue::new_struct(registry, user_id_ttype_id, vec![
-                FieldValue::new("id".parse().unwrap(), Value::Scalar(ScalarValue::Int32(id))),
-            ]).unwrap())
+            StructValue::new(registry, user_id_ttype_id.clone(), btreemap! {
+                "id".parse().unwrap() => Value::Scalar(ScalarValueInner::Int32(id).into()),
+            }).unwrap().into()
         }
 
-        let mut registry = TypeRegistry::new();
+        let registry = TypeRegistry::new();
 
-        let user_ttype = TType::Composite(CompositeType::new_struct(vec![
-            FieldType::new("id".parse().unwrap(), TTypeId::INT32),
-            FieldType::new("active".parse().unwrap(), TTypeId::BOOL),
-        ]).unwrap());
+        let user_struct = StructType::new(btreemap! {
+            "id".parse().unwrap() => TTypeId::INT32,
+            "active".parse().unwrap() => TTypeId::BOOL,
+        });
 
-        let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_ttype.select(&registry, &IdentTree::from_nested_idents(vec!["id".parse().unwrap()])).unwrap()));
+        let user_ttype_id = TTypeId::Anonymous(Box::new(user_struct.clone().into()));
 
-        let user_ttype_id = registry.add("User", user_ttype).unwrap();
-        
+        let user_id_struct = user_struct.select(
+            &registry,
+            &IdentTree::from_nested_idents(["id".parse().unwrap()])
+        ).unwrap();
+
+        let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_id_struct.clone().into()));
+
         let user_pkey = IdentTree::from_nested_idents(vec!["id".parse().unwrap()]);
-        let user_schema = Schema::new(&registry, user_ttype_id.clone(), user_pkey).unwrap();
+        let user_schema = Schema::new(&registry, user_struct, user_pkey).unwrap();
 
         let mut users = MemoryRelation::new(user_schema.clone());
         let mut inactive_users = MemoryRelation::new(user_schema.clone());
@@ -137,7 +167,9 @@ mod tests {
             .map(|r| r.unwrap())
             .filter_map(|row| {
                 let Value::Composite(CompositeValue::Struct(value)) = row.clone() else { unreachable!() };
-                value.fields().iter().find(|f| f.name() == "active" && *f.value() == Value::Scalar(ScalarValue::Bool(false)))
+
+                value.fields().get("active")
+                    .filter(|value| **value == Value::Scalar(ScalarValueInner::Bool(false).into()))
                     .map(|_| row)
             });
         inactive_users.extend(&registry, new_rows).unwrap().unwrap();
@@ -154,7 +186,7 @@ mod tests {
         // cannot insert again
         assert_eq!(false, inactive_users.insert(&registry, user_3).unwrap().unwrap());
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &TTypeId::Scalar(ScalarType::Bool), vec![]).unwrap())).unwrap_err();
-        // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &TTypeId::Scalar(ScalarType::Bool), vec![FieldValue::new("id", Value::Scalar(ScalarValue::Int32(2)))]).unwrap())).unwrap_err();
+        // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &TTypeId::Scalar(ScalarType::Bool), vec![FieldValue::new("id", Value::Scalar(ScalarValueInner::Int32(2)))]).unwrap())).unwrap_err();
 
         // check range
         let users_range = users.range(&registry, users.schema.pkey(), new_id(&registry, &user_id_ttype_id, 1)..new_id(&registry, &user_id_ttype_id, 3)).unwrap().enumerate().collect_vec();

@@ -1,9 +1,9 @@
 use std::{io, ops::RangeBounds};
 
-use crate::{idents::IdentTree, typesystem::{registry::{TTypeId, TypeRegistry, TypeRegistryError}, ttype::TType, value::Value, TypeError}};
+use crate::{idents::IdentTree, typesystem::{registry::{TTypeId, TypeRegistry, TypeRegistryError}, ttype::StructType, value::Value, TypeError}};
 
-mod memory;
-mod file;
+pub mod memory;
+pub mod file;
 
 pub type PKey = Value;
 pub type Row = Value;
@@ -40,7 +40,7 @@ pub trait RelationRef {
     fn draw(&self, registry: &TypeRegistry) -> String {
         let mut out_string = String::new();
 
-        out_string += &format!("{:?}\n", registry.get_by_id(self.schema().ttype_id()).unwrap());
+        out_string += &format!("{:?}\n", self.schema().ttype());
 
         for row in self.range(registry, [], ..).unwrap() {
             out_string += &format!("{:?}\n", row.unwrap());
@@ -71,7 +71,7 @@ pub trait Relation: RelationRef {
     fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> io::Result<RowSize>;
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SchemaError {
     #[error("cannot make primary key: {0}")]
     PrimaryKeyInvalid(TypeError),
@@ -81,26 +81,34 @@ pub enum SchemaError {
 
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Schema {
-    ttype_id: TTypeId,
+    ttype: StructType,
     pkey: Box<[IdentTree]>,
 }
 
 impl Schema {
-    pub fn new(registry: &TypeRegistry, ttype_id: TTypeId, pkey: Box<[IdentTree]>) -> Result<Schema, SchemaError> {
-        registry.get_by_id(&ttype_id)?.select(registry, &pkey).map_err(|err| SchemaError::PrimaryKeyInvalid(err))?;
+    pub fn new(registry: &TypeRegistry, ttype: StructType, pkey: impl Into<Box<[IdentTree]>>) -> Result<Schema, SchemaError> {
+        let pkey = pkey.into();
+        
+        if let Err(err) = ttype.select(registry, &pkey) {
+            return Err(SchemaError::PrimaryKeyInvalid(err));
+        }
 
         Ok(Schema {
-            ttype_id,
+            ttype,
             pkey,
         })
     }
 
-    pub fn ttype_id(&self) -> &TTypeId {
-        &self.ttype_id
+    pub fn ttype(&self) -> &StructType {
+        &self.ttype
     }
 
-    pub fn pkey_ttype(&self, registry: &TypeRegistry) -> Result<TType, TypeRegistryError> {
-        Ok(registry.get_by_id(&self.ttype_id)?.select(registry, &self.pkey).expect("invalid primary key idents"))
+    pub fn ttype_id(&self) -> TTypeId {
+        TTypeId::Anonymous(Box::new(self.ttype.clone().into()))
+    }
+
+    pub fn pkey_ttype(&self, registry: &TypeRegistry) -> Result<StructType, TypeRegistryError> {
+        Ok(self.ttype.select(registry, &self.pkey).expect("invalid primary key idents"))
     }
 
     pub fn pkey(&self) -> &[IdentTree] {

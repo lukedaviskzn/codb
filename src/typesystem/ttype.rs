@@ -1,26 +1,14 @@
-use std::fmt::Debug;
+use std::{collections::BTreeMap, fmt::Debug};
 
-use itertools::Itertools;
+use crate::{expr::Expression, idents::{Ident, IdentTree}};
 
-use crate::{expr::Expression, idents::{Ident, IdentTree}, typesystem::value::ScalarValue};
-
-use super::{registry::{TTypeId, TypeRegistry}, value::{CompositeValue, EnumValue, FieldValue, StructValue, Value}, DuplicateField, RefinementFailedError, TypeError};
+use super::{registry::{TTypeId, TypeRegistry, TypeRegistryError}, value::{EnumValue, ScalarValueInner, Value}, TypeError};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TType {
-    Refined(RefinedType),
+    // Refined(RefinedType),
     Composite(CompositeType),
     Scalar(ScalarType),
-}
-
-impl Debug for TType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Refined(ttype) => Debug::fmt(ttype, f),
-            Self::Composite(ttype) => Debug::fmt(ttype, f),
-            Self::Scalar(ttype) => Debug::fmt(ttype, f),
-        }
-    }
 }
 
 impl TType {
@@ -31,7 +19,7 @@ impl TType {
 
     pub fn select(&self, registry: &TypeRegistry, trees: &[IdentTree]) -> Result<TType, TypeError> {
         match self {
-            TType::Refined(ttype) => ttype.select(registry, trees),
+            // TType::Refined(ttype) => ttype.select(registry, trees),
             TType::Composite(ttype) => Ok(TType::Composite(ttype.select(registry, trees)?)),
             TType::Scalar(ttype) => Ok(TType::Scalar(ttype.select(trees)?)),
         }
@@ -39,39 +27,70 @@ impl TType {
 
     pub fn dot(&self, registry: &TypeRegistry, ident: &Ident) -> Result<TType, TypeError> {
         match self {
-            TType::Refined(ttype) => ttype.dot(registry, ident),
+            // TType::Refined(ttype) => ttype.dot(registry, ident),
             TType::Composite(ttype) => ttype.dot(registry, ident),
             TType::Scalar(_) => Err(TypeError::ScalarField(ident.clone())),
         }
     }
 
-    pub fn check(&self, registry: &TypeRegistry, value: &Value) -> Result<(), TypeError> {
-        match self {
-            TType::Refined(ttype) => ttype.check(registry, value),
-            TType::Composite(ttype) => if let Value::Composite(value) = value {
-                ttype.check(registry, value)
-            } else {
-                Err(TypeError::ValueTypeInvalid {
-                    expected: TType::Composite(ttype.clone()),
-                    got: value.clone(),
-                })
-            },
-            TType::Scalar(ttype) => if let Value::Scalar(value) = value {
-                ttype.check(value)
-            } else {
-                Err(TypeError::ValueTypeInvalid {
-                    expected: TType::Scalar(ttype.clone()),
-                    got: value.clone(),
-                })
-            },
+    pub fn unrefined(self, registry: &TypeRegistry) -> Result<(TType, Box<[Expression]>), TypeRegistryError> {
+        fn unrefine(ttype: TType, registry: &TypeRegistry, conditions: &mut Vec<Expression>) -> Result<TType, TypeRegistryError> {
+            match ttype {
+                // TType::Refined(ttype) => {
+                //     conditions.push(*ttype.condition);
+                //     unrefine(registry.get_by_id(&ttype.ttype_id)?, registry, conditions)
+                // },
+                TType::Composite(ttype) => Ok(TType::Composite(ttype)),
+                TType::Scalar(ttype) => Ok(TType::Scalar(ttype)),
+            }
         }
+
+        let mut conditions = vec![];
+        
+        let ttype = unrefine(self, registry, &mut conditions)?;
+
+        Ok((ttype, conditions.into()))
+    }
+}
+
+impl Debug for TType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Self::Refined(ttype) => Debug::fmt(ttype, f),
+            Self::Composite(ttype) => Debug::fmt(ttype, f),
+            Self::Scalar(ttype) => Debug::fmt(ttype, f),
+        }
+    }
+}
+
+impl From<CompositeType> for TType {
+    fn from(value: CompositeType) -> Self {
+        Self::Composite(value)
+    }
+}
+
+impl From<StructType> for TType {
+    fn from(value: StructType) -> Self {
+        Self::Composite(CompositeType::Struct(value))
+    }
+}
+
+impl From<EnumType> for TType {
+    fn from(value: EnumType) -> Self {
+        Self::Composite(CompositeType::Enum(value))
+    }
+}
+
+impl From<ScalarType> for TType {
+    fn from(value: ScalarType) -> Self {
+        Self::Scalar(value)
     }
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RefinedType {
     ttype_id: TTypeId,
-    refinement: Box<Expression>,
+    condition: Box<Expression>,
 }
 
 impl RefinedType {
@@ -81,18 +100,20 @@ impl RefinedType {
 
     pub fn result_ok(registry: &TypeRegistry) -> Value {
         let ttype_id = registry.get_id_by_name(Self::RESULT_TYPE_NAME).expect("unreachable");
-
-        Value::Composite(CompositeValue::Enum(EnumValue::new(registry, &ttype_id,
-            FieldValue::new(Self::RESULT_TYPE_OK.parse().expect("unreachable"), Value::UNIT)
-        ).expect("unreachable")))
+        
+        EnumValue::new(
+            registry, ttype_id,
+            Self::RESULT_TYPE_OK.parse().expect("unreachable"),
+            Value::Scalar(ScalarValueInner::Unit.into()),
+        ).expect("unreachable").into()
     }
 
-    pub fn new(registry: &TypeRegistry, ttype_id: TTypeId, refinement: Expression) -> Result<RefinedType, TypeError> {
-        let refinement_ttype = refinement.eval_types(registry, &StructType {
-            fields: vec![
-                FieldType::new("this".parse().expect("unreachable"), ttype_id.clone()),
-            ],
-        })?;
+    pub fn new(registry: &TypeRegistry, ttype_id: TTypeId, condition: Expression) -> Result<RefinedType, TypeError> {
+        let refinement_ttype = condition.eval_types(registry, &[&StructType {
+            fields: btreemap! {
+                "this".parse().expect("unreachable") => ttype_id.clone(),
+            },
+        }])?;
 
         let result_ttype = registry.get_by_name(Self::RESULT_TYPE_NAME)?;
 
@@ -102,8 +123,16 @@ impl RefinedType {
 
         Ok(RefinedType {
             ttype_id: ttype_id,
-            refinement: Box::new(refinement),
+            condition: Box::new(condition),
         })
+    }
+
+    pub fn ttype_id(&self) -> &TTypeId {
+        &self.ttype_id
+    }
+
+    pub fn condition(&self) -> &Expression {
+        &self.condition
     }
 
     pub fn select(&self, registry: &TypeRegistry, ident_trees: &[IdentTree]) -> Result<TType, TypeError> {
@@ -113,39 +142,12 @@ impl RefinedType {
     pub fn dot(&self, registry: &TypeRegistry, ident: &Ident) -> Result<TType, TypeError> {
         registry.get_by_id(&self.ttype_id)?.dot(registry, ident)
     }
-
-    pub fn check(&self, registry: &TypeRegistry, value: &Value) -> Result<(), TypeError> {
-        registry.get_by_id(&self.ttype_id)?.check(registry, value)?;
-
-        let variables_ttype = TTypeId::Anonymous(Box::new(TType::Composite(CompositeType::Struct(StructType {
-            fields: vec![
-                FieldType::new("this".parse().expect("unreachable"), value.ttype_id()),
-            ],
-        }))));
-
-        let expr = self.refinement.eval(registry, &StructValue::new(registry, &variables_ttype, vec![
-            FieldValue::new("this".parse().expect("unreachable"), value.clone()),
-        ]).expect("unreachable")).map_err(|err| RefinementFailedError::Expr(Box::new(err)))?;
-
-        let result_ttype = registry.get_by_name(Self::RESULT_TYPE_NAME)?;
-
-        result_ttype.check(registry, &expr)?;
-
-        if expr != Self::result_ok(registry) {
-            let Value::Composite(CompositeValue::Enum(expr)) = expr else { unreachable!() };
-            let Value::Scalar(ScalarValue::String(string)) = expr.into_tag().into_value() else { unreachable!() };
-
-            return Err(TypeError::RefinementFailed(RefinementFailedError::Refinement(string)))
-        }
-
-        Ok(())
-    }
 }
 
 impl Debug for RefinedType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Debug::fmt(&self.ttype_id, f)?;
-        write!(f, " {{ {:?} }}", &self.refinement)
+        write!(f, " {{ {:?} }}", &self.condition)
     }
 }
 
@@ -155,24 +157,7 @@ pub enum CompositeType {
     Enum(EnumType),
 }
 
-impl Debug for CompositeType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Struct(ttype) => Debug::fmt(ttype, f),
-            Self::Enum(ttype) => Debug::fmt(ttype, f),
-        }
-    }
-}
-
 impl CompositeType {
-    pub fn new_struct(fields: impl Into<Vec<FieldType>>) -> Result<CompositeType, DuplicateField> {
-        Ok(CompositeType::Struct(StructType::new(fields)?))
-    }
-
-    pub fn new_enum(tags: impl Into<Vec<FieldType>>) -> Result<CompositeType, DuplicateField> {
-        Ok(CompositeType::Enum(EnumType::new(tags)?))
-    }
-
     pub fn select(&self, registry: &TypeRegistry, ident_trees: &[IdentTree]) -> Result<CompositeType, TypeError> {
         match self {
             CompositeType::Struct(ttype) => Ok(CompositeType::Struct(ttype.select(registry, ident_trees)?)),
@@ -186,69 +171,42 @@ impl CompositeType {
             CompositeType::Enum(_) => Err(TypeError::DotTag(ident.clone())),
         }
     }
-
-    pub fn check(&self, registry: &TypeRegistry, value: &CompositeValue) -> Result<(), TypeError> {
-        match self {
-            CompositeType::Struct(ttype) => if let CompositeValue::Struct(value) = value {
-                ttype.check(registry, value)
-            } else {
-                Err(TypeError::ValueTypeInvalid {
-                    expected: TType::Composite(CompositeType::Struct(ttype.clone())),
-                    got: Value::Composite(value.clone()),
-                })
-            },
-            CompositeType::Enum(ttype) => if let CompositeValue::Enum(value) = value {
-                ttype.check(registry, value)
-            } else {
-                Err(TypeError::ValueTypeInvalid {
-                    expected: TType::Composite(CompositeType::Enum(ttype.clone())),
-                    got: Value::Composite(value.clone()),
-                })
-            },
-        }
-    }
 }
 
-#[derive(Clone, Eq, Ord, Hash, serde::Serialize, serde::Deserialize)]
-pub struct StructType {
-    fields: Vec<FieldType>,
-}
-
-impl Debug for StructType {
+impl Debug for CompositeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut d = f.debug_struct("(×)");
-        for field in &self.fields {
-            d.field(&field.name, &field.ttype_id);
+        match self {
+            Self::Struct(ttype) => Debug::fmt(ttype, f),
+            Self::Enum(ttype) => Debug::fmt(ttype, f),
         }
-        d.finish()
     }
 }
 
-impl PartialEq for StructType {
-    fn eq(&self, other: &Self) -> bool {
-        self.partial_cmp(other) == Some(std::cmp::Ordering::Equal)
+impl From<StructType> for CompositeType {
+    fn from(value: StructType) -> Self {
+        Self::Struct(value)
     }
 }
 
-impl PartialOrd for StructType {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.fields.iter().sorted().map(|f| &f.ttype_id).partial_cmp(other.fields.iter().sorted().map(|f| &f.ttype_id))
+impl From<EnumType> for CompositeType {
+    fn from(value: EnumType) -> Self {
+        Self::Enum(value)
     }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct StructType {
+    fields: BTreeMap<Ident, TTypeId>,
 }
 
 impl StructType {
-    pub fn new(fields: impl Into<Vec<FieldType>>) -> Result<StructType, DuplicateField> {
-        let fields: Vec<FieldType> = fields.into();
-        if let Some(_) = fields.iter().duplicates_by(|f| &f.name).next() {
-            Err(DuplicateField)
-        } else {
-            Ok(StructType {
-                fields,
-            })
+    pub fn new(fields: BTreeMap<Ident, TTypeId>) -> StructType {
+        StructType {
+            fields: fields.into(),
         }
     }
 
-    pub fn fields(&self) -> &[FieldType] {
+    pub fn fields(&self) -> &BTreeMap<Ident, TTypeId> {
         &self.fields
     }
 
@@ -257,19 +215,19 @@ impl StructType {
             return Ok(self.clone());
         }
 
-        let mut new_fields = Vec::new();
+        let mut new_fields = BTreeMap::new();
         
-        for ident in ident_trees {
-            if let Some(field) = self.fields.iter().find(|f| &f.name == ident.ident()) {
-                let field_type = registry.get_by_id(&field.ttype_id)?;
+        for tree in ident_trees {
+            let ident = tree.ident().clone();
 
-                let new_field = FieldType {
-                    name: field.name.clone(),
-                    ttype_id: TTypeId::Anonymous(Box::new(field_type.select(registry, ident.children())?)),
-                };
-                new_fields.push(new_field);
+            if let Some(ttype_id) = self.fields.get(&ident) {
+                let field_type = registry.get_by_id(ttype_id)?;
+
+                new_fields.insert(ident, TTypeId::new_anonymous(
+                    field_type.select(registry, tree.children())?
+                ));
             } else {
-                return Err(TypeError::UnknownField(ident.ident().clone()));
+                return Err(TypeError::UnknownField(ident));
             }
         }
         
@@ -279,143 +237,79 @@ impl StructType {
     }
 
     pub fn dot(&self, registry: &TypeRegistry, ident: &Ident) -> Result<TType, TypeError> {
-        if let Some(field) = self.fields.iter().find(|f| &f.name == ident) {
-            let ttype = registry.get_by_id(&field.ttype_id)?;
+        if let Some(field_ttype_id) = self.fields.get(ident)  {
+            let ttype = registry.get_by_id(field_ttype_id)?;
             Ok(ttype)
         } else {
             Err(TypeError::MissingField(ident.clone()))
         }
     }
-
-    pub fn check(&self, registry: &TypeRegistry, value: &StructValue) -> Result<(), TypeError> {
-        for v_field in value.fields() {
-            if let Some(field) = self.fields.iter().find(|field| &field.name == v_field.name()) {
-                let ttype = registry.get_by_id(&field.ttype_id)?;
-                ttype.check(registry, v_field.value())?;
-            } else {
-                return Err(TypeError::UnknownField(v_field.name().clone()));
-            }
-        }
-
-        for field in &self.fields {
-            if value.fields().iter().all(|v_field| v_field.name() != &field.name) {
-                return Err(TypeError::MissingField(field.name.clone()));
-            }
-        }
-
-        if value.fields().len() != self.fields.len() {
-            Err(DuplicateField)?;
-        }
-
-        Ok(())
-    }
 }
 
-#[derive(Clone, Eq, Ord, Hash, serde::Serialize, serde::Deserialize)]
-pub struct EnumType {
-    tags: Vec<FieldType>,
-}
-
-impl Debug for EnumType {
+impl Debug for StructType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut d = f.debug_struct("(+)");
-        for tag in &self.tags {
-            d.field(&tag.name, &tag.ttype_id);
+        let mut d = f.debug_struct("struct");
+        for (name, ttype_id) in &self.fields {
+            d.field(name, ttype_id);
         }
         d.finish()
     }
 }
 
-impl PartialEq for EnumType {
-    fn eq(&self, other: &Self) -> bool {
-        self.partial_cmp(other) == Some(std::cmp::Ordering::Equal)
-    }
-}
-
-impl PartialOrd for EnumType {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.tags.iter().sorted().map(|f| &f.ttype_id).partial_cmp(other.tags.iter().sorted().map(|f| &f.ttype_id))
-    }
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct EnumType {
+    tags: BTreeMap<Ident, TTypeId>,
 }
 
 impl EnumType {
-    pub fn new(tags: impl Into<Vec<FieldType>>) -> Result<EnumType, DuplicateField> {
-        let tags: Vec<FieldType> = tags.into();
-        
-        if let Some(_) = tags.iter().duplicates_by(|f| &f.name).next() {
-            Err(DuplicateField)
-        } else {
-            Ok(EnumType {
-                tags,
-            })
+    pub fn new(tags: BTreeMap<Ident, TTypeId>) -> EnumType {
+        EnumType {
+            tags,
         }
     }
 
-    pub fn tags(&self) -> &[FieldType] {
+    pub fn tags(&self) -> &BTreeMap<Ident, TTypeId> {
         &self.tags
     }
 
-    pub fn select(&self, idents: &[IdentTree]) -> Result<EnumType, TypeError> {
-        if idents.is_empty() {
+    pub fn select(&self, ident_trees: &[IdentTree]) -> Result<EnumType, TypeError> {
+        if ident_trees.is_empty() {
             return Ok(self.clone());
         }
 
         // all tags must be listed
-        for tag in &self.tags {
-            if idents.iter().all(|ident| ident.ident() != &tag.name) {
-                return Err(TypeError::MissingTag(tag.name.clone()));
+        for (name, _) in &self.tags {
+            if !self.tags.contains_key(name) {
+                return Err(TypeError::MissingTag(name.clone()));
             }
         }
 
         // all idents must be valid
-        for ident in idents {
-            if self.tags.iter().all(|tag| &tag.name != ident.ident()) {
-                return Err(TypeError::UnknownTag(ident.ident().clone()));
+        for tree in ident_trees {
+            let ident = tree.ident().clone();
+            
+            if !self.tags.contains_key(&ident) {
+                return Err(TypeError::UnknownTag(ident));
             }
-        }
-
-        if idents.len() != self.tags.len() {
-            Err(DuplicateField)?;
         }
 
         Ok(self.clone())
     }
-
-    pub fn check(&self, registry: &TypeRegistry, value: &EnumValue) -> Result<(), TypeError> {
-        if let Some(tag) = self.tags.iter().find(|tag| &tag.name == value.tag().name()) {
-            let ttype = registry.get_by_id(&tag.ttype_id)?;
-            ttype.check(registry, value.tag().value())
-        } else {
-            Err(TypeError::UnknownTag(value.tag().name().clone()))
-        }
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
-pub struct FieldType {
-    name: Ident,
-    ttype_id: TTypeId,
-}
-
-impl FieldType {
-    pub fn new(name: Ident, ttype_id: TTypeId) -> FieldType {
-        FieldType {
-            name,
-            ttype_id,
+impl Debug for EnumType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("enum");
+        for (name, ttype_id) in &self.tags {
+            d.field(name, ttype_id);
         }
-    }
-
-    pub fn name(&self) -> &Ident {
-        &self.name
-    }
-
-    pub fn ttype_id(&self) -> &TTypeId {
-        &self.ttype_id
+        d.finish()
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ScalarType {
+    Never,
     Unit,
     Bool,
     Int32,
@@ -423,10 +317,15 @@ pub enum ScalarType {
 }
 
 impl ScalarType {
-    pub const ALL: [ScalarType; 4] = [ScalarType::Unit, ScalarType::Bool, ScalarType::Int32, ScalarType::String];
+    pub const ALL: [ScalarType; 5] = [ScalarType::Never, ScalarType::Unit, ScalarType::Bool, ScalarType::Int32, ScalarType::String];
+
+    pub fn from_name(name: &str) -> Option<ScalarType> {
+        Self::ALL.iter().find(|st| st.name() == name).map(|st| *st)
+    }
 
     pub fn name(&self) -> &str {
         match self {
+            ScalarType::Never => "!",
             ScalarType::Unit => "()",
             ScalarType::Bool => "bool",
             ScalarType::Int32 => "int32",
@@ -434,24 +333,11 @@ impl ScalarType {
         }
     }
 
-    pub fn select(&self, idents: &[IdentTree]) -> Result<ScalarType, TypeError> {
-        if let Some(first) = idents.first() {
+    pub fn select(&self, ident_trees: &[IdentTree]) -> Result<ScalarType, TypeError> {
+        if let Some(first) = ident_trees.first() {
             Err(TypeError::ScalarField(first.ident().clone()))
         } else {
             Ok(self.clone())
-        }
-    }
-
-    pub fn check(&self, value: &ScalarValue) -> Result<(), TypeError> {
-        match value {
-            ScalarValue::Unit if ScalarType::Unit == *self => Ok(()),
-            ScalarValue::Bool(_) if ScalarType::Bool == *self => Ok(()),
-            ScalarValue::Int32(_) if ScalarType::Int32 == *self => Ok(()),
-            ScalarValue::String(_) if ScalarType::String == *self => Ok(()),
-            _ => Err(TypeError::ValueTypeInvalid {
-                expected: TType::Scalar(self.clone()),
-                got: Value::Scalar(value.clone()),
-            }),
         }
     }
 }

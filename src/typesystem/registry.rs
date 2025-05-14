@@ -1,8 +1,8 @@
 use std::fmt::Debug;
 
-use super::ttype::{CompositeType, EnumType, FieldType, RefinedType, ScalarType, TType};
+use super::ttype::{CompositeType, EnumType, RefinedType, ScalarType, TType};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TypeRegistryError {
     #[error("type with name {0:?} already exists")]
     NameTaken(String),
@@ -16,7 +16,16 @@ pub enum TypeRegistryError {
 pub enum TTypeId {
     Scalar(ScalarType),
     Id(u64),
-    Anonymous(Box<TType>),
+    Anonymous(Box<CompositeType>),
+}
+
+impl TTypeId {
+    pub fn new_anonymous(ttype: TType) -> TTypeId {
+        match ttype {
+            TType::Composite(composite_type) => TTypeId::Anonymous(Box::new(composite_type)),
+            TType::Scalar(scalar_type) => TTypeId::Scalar(scalar_type),
+        }
+    }
 }
 
 impl TTypeId {
@@ -31,7 +40,11 @@ impl Debug for TTypeId {
         match self {
             Self::Scalar(ttype) => Debug::fmt(ttype, f),
             Self::Id(id) => write!(f, "type#{id}"),
-            Self::Anonymous(ttype) => Debug::fmt(ttype, f),
+            Self::Anonymous(ttype) => {
+                write!(f, "anon[")?;
+                Debug::fmt(ttype, f)?;
+                write!(f, "]")
+            },
         }
     }
 }
@@ -60,10 +73,10 @@ impl TypeRegistry {
             entries: vec![],
         };
 
-        registry.add(RefinedType::RESULT_TYPE_NAME, TType::Composite(CompositeType::Enum(EnumType::new(vec![
-            FieldType::new(RefinedType::RESULT_TYPE_OK.parse().expect("unreachable"), TTypeId::UNIT),
-            FieldType::new(RefinedType::RESULT_TYPE_ERR.parse().expect("unreachable"), TTypeId::STRING),
-        ]).expect("unreachable")))).expect("unreachable");
+        registry.add(RefinedType::RESULT_TYPE_NAME, TType::Composite(CompositeType::Enum(EnumType::new(btreemap! {
+            RefinedType::RESULT_TYPE_OK.parse().expect("unreachable") => TTypeId::UNIT,
+            RefinedType::RESULT_TYPE_ERR.parse().expect("unreachable") => TTypeId::STRING,
+        })))).expect("unreachable");
 
         registry
     }
@@ -80,7 +93,7 @@ impl TypeRegistry {
             } else {
                 Err(TypeRegistryError::TypeIdNotFound(*id))
             },
-            TTypeId::Anonymous(ttype) => Ok(*ttype.clone()),
+            TTypeId::Anonymous(ttype) => Ok((*ttype.clone()).into()),
         }
     }
 
