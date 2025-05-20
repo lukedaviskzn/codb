@@ -1,10 +1,10 @@
 mod relation;
 mod typesystem;
-mod registry;
 mod expr;
 mod scope;
 mod db;
 mod query;
+mod error;
 
 #[macro_use]
 extern crate maplit;

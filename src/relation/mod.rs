@@ -2,7 +2,7 @@ use std::{io, ops::RangeBounds};
 
 use codb_core::IdentTree;
 
-use crate::{registry::{Registry, TTypeId, TypeRegistry, TypeRegistryError}, typesystem::{ttype::StructType, value::Value, TypeError}};
+use crate::{db::registry::{Registry, TTypeId}, typesystem::{ttype::{StructType}, value::Value, TypeError}};
 
 pub mod memory;
 pub mod file;
@@ -77,8 +77,6 @@ pub trait Relation: RelationRef {
 pub enum SchemaError {
     #[error("cannot make primary key: {0}")]
     PrimaryKeyInvalid(TypeError),
-    #[error("{0}")]
-    TypeRegistryError(#[from] TypeRegistryError),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
@@ -88,7 +86,7 @@ pub struct Schema {
 }
 
 impl Schema {
-    pub fn new(registry: &TypeRegistry, ttype: StructType, pkey: impl Into<Box<[IdentTree]>>) -> Result<Schema, SchemaError> {
+    pub fn new(registry: &Registry, ttype: StructType, pkey: impl Into<Box<[IdentTree]>>) -> Result<Schema, SchemaError> {
         let pkey = pkey.into();
         
         if let Err(err) = ttype.select(registry, &pkey) {
@@ -106,11 +104,11 @@ impl Schema {
     }
 
     pub fn ttype_id(&self) -> TTypeId {
-        TTypeId::Anonymous(Box::new(self.ttype.clone().into()))
+        TTypeId::new_anonymous(self.ttype.clone().into())
     }
 
-    pub fn pkey_ttype(&self, registry: &TypeRegistry) -> Result<StructType, TypeRegistryError> {
-        Ok(self.ttype.select(registry, &self.pkey).expect("invalid primary key idents"))
+    pub fn pkey_ttype(&self, registry: &Registry) -> Result<StructType, TypeError> {
+        self.ttype.select(registry, &self.pkey)
     }
 
     pub fn pkey(&self) -> &[IdentTree] {

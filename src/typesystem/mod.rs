@@ -1,10 +1,10 @@
 use std::fmt::Debug;
 
-use codb_core::Ident;
+use codb_core::{Ident, IdentPath};
 use ttype::TType;
-use value::{Value, Literal};
+use value::Value;
 
-use crate::{registry::{FunctionRegistryError, TypeRegistryError}};
+use crate::db::registry::TTypeId;
 
 pub mod ttype;
 pub mod value;
@@ -29,15 +29,20 @@ pub enum TypeError {
         expected: TType,
         got: Value,
     },
-    #[error("value literal type invalid, expected {expected:?} got {got:?}")]
-    LiteralTypeInvalid {
-        expected: TType,
-        got: Literal,
+    #[error("value type invalid, expected {expected:?} got {got:?}")]
+    ValueTypeIdInvalid {
+        expected: TTypeId,
+        got: Value,
     },
     #[error("type invalid, expected {expected:?} got {got:?}")]
     TypeInvalid {
         expected: TType,
         got: TType,
+    },
+    #[error("type invalid, expected {expected:?} got {got:?}")]
+    TypeIdInvalid {
+        expected: TTypeId,
+        got: TTypeId,
     },
     #[error("function expects {expected} arguments, got {got}")]
     FunctionArgLen {
@@ -48,8 +53,8 @@ pub enum TypeError {
     FunctionDuplicateArg {
         arg: Ident,
     },
-    #[error("{0}")]
-    TypeRegistryError(#[from] TypeRegistryError),
-    #[error("{0}")]
-    FunctionRegistryError(#[from] FunctionRegistryError),
+    #[error("type `{0:?}` not found")]
+    TypeNotFound(TTypeId),
+    #[error("function `{0:?}` not found")]
+    FunctionNotFound(IdentPath),
 }

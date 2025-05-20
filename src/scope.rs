@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use codb_core::{Ident, NestedIdent};
 
-use crate::{registry::{TTypeId, TypeRegistry}, typesystem::{ttype::{CompositeType, StructType, TType}, value::{StructValue, Value}, TypeError}};
+use crate::{db::registry::{CompositeTTypeId, Registry, TTypeId}, typesystem::{ttype::{CompositeType, StructType}, value::{StructValue, Value}, TypeError}};
 
 #[derive(Debug, Clone, Default)]
 pub struct ScopeTypes<'a> {
@@ -32,16 +32,16 @@ impl<'a> ScopeTypes<'a> {
         self.scopes.pop()
     }
 
-    pub fn get(&self, ident: &Ident) -> Result<&TTypeId, TypeError> {
+    pub fn get(&self, ident: &Ident) -> Option<&TTypeId> {
         for scope in self.scopes.iter().rev() {
             if let Some(ttype) = scope.fields().get(ident) {
-                return Ok(ttype);
+                return Some(ttype);
             }
         }
-        Err(TypeError::UnknownField(ident.clone()))
+        None
     }
 
-    pub fn get_nested(&self, type_registry: &TypeRegistry, nested_ident: &NestedIdent) -> Result<TTypeId, TypeError> {
+    pub fn get_nested(&self, registry: &Registry, nested_ident: &NestedIdent) -> Result<TTypeId, TypeError> {
         let first = nested_ident.first();
         
         let mut ttype_id = None;
@@ -52,16 +52,17 @@ impl<'a> ScopeTypes<'a> {
             }
         }
 
-        let Some(ttype_id) = ttype_id else {
-            return Err(TypeError::UnknownField(first.clone()));
-        };
+        let ttype_id = ttype_id.unwrap(); // todo: fix unwrap
         let mut ttype_id = ttype_id.clone();
 
         let mut ident_list = nested_ident.iter();
         ident_list.next();
         
         for ident in ident_list {
-            ttype_id = type_registry.get_by_id(&ttype_id)?.dot(type_registry, ident)?.clone();
+            ttype_id = registry.ttype(&ttype_id)
+                .ok_or_else(|| TypeError::TypeNotFound(ttype_id.clone()))?
+                .dot(ident).unwrap() // todo: fix unwrap
+                .clone();
         }
 
         Ok(ttype_id.clone())
@@ -131,13 +132,15 @@ impl<'a> ScopeValues<'a> {
         Ok(value)
     }
 
-    pub fn types(&self, type_registry: &TypeRegistry) -> Result<ScopeTypes, TypeError> {
+    pub fn types(&self) -> Result<ScopeTypes, TypeError> {
         let mut scopes = Vec::new();
 
         for scope in &self.scopes {
-            let ttype = type_registry.get_by_id(&scope.ttype_id())?;
-            
-            let TType::Composite(CompositeType::Struct(ttype)) = ttype else {
+            let TTypeId::Composite(CompositeTTypeId::Anonymous(ttype)) = scope.ttype_id() else {
+                unreachable!("Scope type is not anonymous!");
+            };
+
+            let CompositeType::Struct(ttype) = *ttype else {
                 unreachable!("Scope type is not a struct!");
             };
             

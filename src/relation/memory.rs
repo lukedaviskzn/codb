@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, io, ops::{Bound, RangeBounds}};
 
 use codb_core::IdentTree;
 
-use crate::{registry::{Registry, TTypeId}, typesystem::{value::Value, TypeError}};
+use crate::{db::registry::{Registry, TTypeId}, typesystem::{value::Value, TypeError}};
 
 use super::{PKey, Relation, RelationRef, Row, RowSize, Schema};
 
@@ -44,27 +44,19 @@ impl RelationRef for MemoryRelation {
 
     fn range(&self, registry: &Registry, ident_trees: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError> {
         let ident_trees = Into::<Box<[IdentTree]>>::into(ident_trees);
-        let selected_type = self.schema.ttype.select(registry.types(), &ident_trees)?;
+        let selected_type = self.schema.ttype.select(registry, &ident_trees)?;
+
+        let selected_type_id = TTypeId::new_anonymous(selected_type.clone().into());
 
         if let Bound::Included(bound) | Bound::Excluded(bound) = range.start_bound() {
-            if bound.ttype_id() != TTypeId::Anonymous(Box::new(selected_type.clone().into())) {
-                return Err(TypeError::TypeInvalid {
-                    expected: selected_type.into(),
-                    got: registry.types().get_by_id(&bound.ttype_id())?,
-                })
-            }
+            bound.ttype_id().must_eq(&selected_type_id);
         }
         
         if let Bound::Included(bound) | Bound::Excluded(bound) = range.end_bound() {
-            if bound.ttype_id() != TTypeId::Anonymous(Box::new(selected_type.clone().into())) {
-                return Err(TypeError::TypeInvalid {
-                    expected: selected_type.into(),
-                    got: registry.types().get_by_id(&bound.ttype_id())?,
-                })
-            }
+            bound.ttype_id().must_eq(&selected_type_id);
         }
 
-        if selected_type.eq(&self.schema.pkey_ttype(registry.types())?) {
+        if selected_type.eq(&self.schema.pkey_ttype(registry)?) {
             Ok(MemRelationIter::Index(self.rows.range(range).map(|(_, row)| Ok(row.clone()))))
         } else {
             let owned_range = (range.start_bound().cloned(), range.end_bound().cloned());
@@ -75,14 +67,11 @@ impl RelationRef for MemoryRelation {
 
 impl Relation for MemoryRelation {
     fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<io::Result<bool>, TypeError> {
-        if TTypeId::Anonymous(Box::new(self.schema.ttype.clone().into())) != new_row.ttype_id() {
-            return Err(TypeError::TypeInvalid {
-                expected: self.schema.ttype.clone().into(),
-                got: registry.types().get_by_id(&new_row.ttype_id())?,
-            });
-        }
+        let schema_ttype_id = self.schema.ttype_id();
 
-        let pkey = new_row.select(registry.types(), &self.schema.pkey)?;
+        new_row.ttype_id().must_eq(&schema_ttype_id)?;
+
+        let pkey = new_row.select(registry, &self.schema.pkey)?;
         
         if self.rows.contains_key(&pkey) {
             Ok(Ok(false))
@@ -93,15 +82,10 @@ impl Relation for MemoryRelation {
     }
 
     fn remove(&mut self, registry: &Registry, pkey: &PKey) -> Result<io::Result<Option<Row>>, TypeError> {
-        let pkey_ttype = self.schema.pkey_ttype(registry.types())?;
-        let pkey_type_id = TTypeId::Anonymous(Box::new(pkey_ttype.clone().into()));
+        let pkey_ttype = self.schema.pkey_ttype(registry)?;
+        let pkey_ttype_id = TTypeId::new_anonymous(pkey_ttype.clone().into());
 
-        if pkey_type_id != pkey.ttype_id() {
-            return Err(TypeError::TypeInvalid {
-                expected: pkey_ttype.into(),
-                got: registry.types().get_by_id(&pkey.ttype_id())?,
-            })
-        }
+        pkey_ttype_id.must_eq(&pkey.ttype_id())?;
 
         Ok(Ok(self.rows.remove(pkey)))
     }
@@ -118,53 +102,52 @@ impl Relation for MemoryRelation {
 mod tests {
     use itertools::Itertools;
 
-    use crate::{registry::TypeRegistry, typesystem::{ttype::StructType, value::{CompositeValue, ScalarValueInner, StructValue}}};
+    use crate::{typesystem::{ttype::StructType, value::{CompositeValue, ScalarValue, StructValue}}};
 
     use super::*;
 
     #[test]
     fn memory_relation() {
-        fn new_user(registry: &TypeRegistry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
+        fn new_user(registry: &Registry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
             StructValue::new(registry, user_ttype_id.clone(), btreemap! {
-                id!("id") => Value::Scalar(ScalarValueInner::Int32(id).into()),
-                id!("active") => Value::Scalar(ScalarValueInner::Bool(active).into()),
+                id!("id") => ScalarValue::Int32(id).into(),
+                id!("active") => ScalarValue::Bool(active).into(),
             }).unwrap().into()
         }
 
-        fn new_id(registry: &TypeRegistry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
+        fn new_id(registry: &Registry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
             StructValue::new(registry, user_id_ttype_id.clone(), btreemap! {
-                id!("id") => Value::Scalar(ScalarValueInner::Int32(id).into()),
+                id!("id") => ScalarValue::Int32(id).into(),
             }).unwrap().into()
         }
 
         let registry = Registry::new();
-        let type_registry = registry.types();
 
         let user_struct = StructType::new(btreemap! {
             id!("id") => TTypeId::INT32,
             id!("active") => TTypeId::BOOL,
         });
 
-        let user_ttype_id = TTypeId::Anonymous(Box::new(user_struct.clone().into()));
+        let user_ttype_id = TTypeId::new_anonymous(user_struct.clone().into());
 
         let user_id_struct = user_struct.select(
-            &type_registry,
+            &registry,
             &IdentTree::from_nested_idents([id!("id").into()])
         ).unwrap();
 
-        let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_id_struct.clone().into()));
+        let user_id_ttype_id = TTypeId::new_anonymous(user_id_struct.clone().into());
 
         let user_pkey = IdentTree::from_nested_idents([id!("id").into()]);
-        let user_schema = Schema::new(&type_registry, user_struct, user_pkey).unwrap();
+        let user_schema = Schema::new(&registry, user_struct, user_pkey).unwrap();
 
         let mut users = MemoryRelation::new(user_schema.clone());
         let mut inactive_users = MemoryRelation::new(user_schema.clone());
 
-        users.insert(&registry, new_user(&type_registry, &user_ttype_id, 0, false)).unwrap().unwrap();
-        users.insert(&registry, new_user(&type_registry, &user_ttype_id, 1, true)).unwrap().unwrap();
-        users.insert(&registry, new_user(&type_registry, &user_ttype_id, 2, true)).unwrap().unwrap();
-        users.insert(&registry, new_user(&type_registry, &user_ttype_id, 3, false)).unwrap().unwrap();
-        users.insert(&registry, new_user(&type_registry, &user_ttype_id, 4, true)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 1, true)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 2, true)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 3, false)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 4, true)).unwrap().unwrap();
 
         let new_rows = users.range(&registry, [], ..).unwrap()
             .map(|r| r.unwrap())
@@ -172,16 +155,16 @@ mod tests {
                 let Value::Composite(CompositeValue::Struct(value)) = row.clone() else { unreachable!() };
 
                 value.fields().get("active")
-                    .filter(|value| **value == Value::Scalar(ScalarValueInner::Bool(false).into()))
+                    .filter(|value| **value == ScalarValue::Bool(false).into())
                     .map(|_| row)
             });
         inactive_users.extend(&registry, new_rows).unwrap().unwrap();
 
         let mut inactive_users_expected = MemoryRelation::new(user_schema.clone());
 
-        let user_3 = new_user(&type_registry, &user_ttype_id, 3, false);
+        let user_3 = new_user(&registry, &user_ttype_id, 3, false);
 
-        inactive_users_expected.insert(&registry, new_user(&type_registry, &user_ttype_id, 0, false)).unwrap().unwrap();
+        inactive_users_expected.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap().unwrap();
         inactive_users_expected.insert(&registry, user_3.clone()).unwrap().unwrap();
 
         assert_eq!(inactive_users_expected, inactive_users);
@@ -192,12 +175,12 @@ mod tests {
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &TTypeId::Scalar(ScalarType::Bool), vec![FieldValue::new("id", Value::Scalar(ScalarValueInner::Int32(2)))]).unwrap())).unwrap_err();
 
         // check range
-        let users_range = users.range(&registry, users.schema.pkey(), new_id(&type_registry, &user_id_ttype_id, 1)..new_id(registry.types(), &user_id_ttype_id, 3)).unwrap().enumerate().collect_vec();
+        let users_range = users.range(&registry, users.schema.pkey(), new_id(&registry, &user_id_ttype_id, 1)..new_id(&registry, &user_id_ttype_id, 3)).unwrap().enumerate().collect_vec();
 
         assert_eq!(2, users_range.len());
 
         for (i, user) in users_range {
-            assert_eq!(user.unwrap(), new_user(&type_registry, &user_ttype_id, i as i32 + 1, true));
+            assert_eq!(user.unwrap(), new_user(&registry, &user_ttype_id, i as i32 + 1, true));
         }
     }
 }

@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::{BTreeMap, HashSet}, fmt::{Debug, Display}};
 
 use codb_core::{Ident, IdentPath, NestedIdent};
 
-use crate::{registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}, typesystem::{function::{FunctionEntry, InterpreterFunctionAction}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, ScalarValueInner, StructValue, Value}, TypeError}};
+use crate::{db::registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}, typesystem::{function::{FunctionEntry, InterpreterFunctionAction}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, ScalarValue, StructValue, Value}, TypeError}};
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EvalError {
@@ -36,10 +36,7 @@ impl Debug for Expression {
 impl Expression {
     pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
-            Expression::NestedIdent(nested_ident) => {
-                let ttype_id = scopes.get_nested(registry.types(), nested_ident)?;
-                Ok(ttype_id)
-            },
+            Expression::NestedIdent(nested_ident) => scopes.get_nested(registry, nested_ident),
             Expression::Value(value) => Ok(value.ttype_id()),
             Expression::Op(op) => op.eval_types(registry, scopes),
             Expression::ControlFlow(control_flow) => control_flow.eval_types(registry, scopes),
@@ -124,8 +121,8 @@ impl LogicalOp {
                 let left_type_id = left.eval_types(registry, scopes)?;
                 let right_type_id = right.eval_types(registry, scopes)?;
 
-                registry.types().expect_type(&TTypeId::BOOL, &left_type_id)?;
-                registry.types().expect_type(&TTypeId::BOOL, &right_type_id)?;
+                left_type_id.must_eq(&TTypeId::BOOL)?;
+                right_type_id.must_eq(&TTypeId::BOOL)?;
                 
                 Ok(TTypeId::BOOL)
             },
@@ -136,8 +133,8 @@ impl LogicalOp {
                 let left_type_id = left.eval_types(registry, scopes)?;
                 let right_type_id = right.eval_types(registry, scopes)?;
 
-                registry.types().expect_type(&TTypeId::BOOL, &left_type_id)?;
-                registry.types().expect_type(&TTypeId::BOOL, &right_type_id)?;
+                left_type_id.must_eq(&TTypeId::BOOL)?;
+                right_type_id.must_eq(&TTypeId::BOOL)?;
 
                 Ok(TTypeId::BOOL)
             },
@@ -145,14 +142,14 @@ impl LogicalOp {
                 let left_type_id = left.eval_types(registry, scopes)?;
                 let right_type_id = right.eval_types(registry, scopes)?;
 
-                registry.types().expect_type(&left_type_id, &right_type_id)?;
+                right_type_id.must_eq(&left_type_id)?;
 
                 Ok(TTypeId::BOOL)
             },
             LogicalOp::Not(expr) => {
                 let expr_type_id = expr.eval_types(registry, scopes)?;
 
-                registry.types().expect_type(&TTypeId::BOOL, &expr_type_id)?;
+                expr_type_id.must_eq(&TTypeId::BOOL);
                 
                 Ok(TTypeId::BOOL)
             },
@@ -165,70 +162,70 @@ impl LogicalOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
 
-                registry.types().expect_type(&TTypeId::BOOL, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::BOOL, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::BOOL)?;
+                right.ttype_id().must_eq(&TTypeId::BOOL)?;
                 
-                Ok(ScalarValueInner::Bool(left == Value::TRUE && right == Value::TRUE).into())
+                Ok(ScalarValue::Bool(left == Value::TRUE && right == Value::TRUE).into())
             },
             LogicalOp::Or(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::BOOL, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::BOOL, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::BOOL)?;
+                right.ttype_id().must_eq(&TTypeId::BOOL)?;
                 
-                Ok(ScalarValueInner::Bool(left == Value::TRUE || right == Value::TRUE).into())
+                Ok(ScalarValue::Bool(left == Value::TRUE || right == Value::TRUE).into())
             },
             LogicalOp::Not(expr) => {
                 let value = expr.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::BOOL, &value.ttype_id())?;
+                value.ttype_id().must_eq(&TTypeId::BOOL)?;
                 
-                Ok(ScalarValueInner::Bool(value == Value::FALSE).into())
+                Ok(ScalarValue::Bool(value == Value::FALSE).into())
             },
             LogicalOp::Eq(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&left.ttype_id(), &right.ttype_id())?;
+                right.ttype_id().must_eq(&left.ttype_id());
                 
-                Ok(ScalarValueInner::Bool(left == right).into())
+                Ok(ScalarValue::Bool(left == right).into())
             },
             LogicalOp::Lt(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::INT32)?;
+                right.ttype_id().must_eq(&TTypeId::INT32)?;
                 
-                Ok(ScalarValueInner::Bool(left < right).into())
+                Ok(ScalarValue::Bool(left < right).into())
             },
             LogicalOp::Gt(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::INT32)?;
+                right.ttype_id().must_eq(&TTypeId::INT32)?;
                 
-                Ok(ScalarValueInner::Bool(left > right).into())
+                Ok(ScalarValue::Bool(left > right).into())
             },
             LogicalOp::Lte(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::INT32)?;
+                right.ttype_id().must_eq(&TTypeId::INT32)?;
                 
-                Ok(ScalarValueInner::Bool(left <= right).into())
+                Ok(ScalarValue::Bool(left <= right).into())
             },
             LogicalOp::Gte(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::INT32)?;
+                right.ttype_id().must_eq(&TTypeId::INT32)?;
                 
-                Ok(ScalarValueInner::Bool(left >= right).into())
+                Ok(ScalarValue::Bool(left >= right).into())
             },
         }
     }
@@ -260,11 +257,11 @@ impl ArithmeticOp {
             ArithmeticOp::Sub(left, right) |
             ArithmeticOp::Mul(left, right) |
             ArithmeticOp::Div(left, right) => {
-                let left_type_id = left.eval_types(registry, scopes)?;
-                let right_type_id = right.eval_types(registry, scopes)?;
-
-                registry.types().expect_type(&TTypeId::INT32, &left_type_id)?;
-                registry.types().expect_type(&TTypeId::INT32, &right_type_id)?;
+                let left_ttype_id = left.eval_types(registry, scopes)?;
+                let right_ttype_id = right.eval_types(registry, scopes)?;
+                
+                left_ttype_id.must_eq(&TTypeId::INT32)?;
+                right_ttype_id.must_eq(&TTypeId::INT32)?;
 
                 Ok(TTypeId::INT32)
             },
@@ -277,61 +274,61 @@ impl ArithmeticOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::INT32)?;
+                right.ttype_id().must_eq(&TTypeId::INT32)?;
 
                 let Value::Scalar(left) = left else { unreachable!() };
                 let Value::Scalar(right) = right else { unreachable!() };
 
-                let ScalarValueInner::Int32(left) = left.inner() else { unreachable!() };
-                let ScalarValueInner::Int32(right) = right.inner() else { unreachable!() };
+                let ScalarValue::Int32(left) = left else { unreachable!() };
+                let ScalarValue::Int32(right) = right else { unreachable!() };
                 
-                Ok(ScalarValueInner::Int32(left + right).into())
+                Ok(ScalarValue::Int32(left + right).into())
             },
             ArithmeticOp::Sub(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::INT32)?;
+                right.ttype_id().must_eq(&TTypeId::INT32)?;
 
                 let Value::Scalar(left) = left else { unreachable!() };
                 let Value::Scalar(right) = right else { unreachable!() };
 
-                let ScalarValueInner::Int32(left) = left.inner() else { unreachable!() };
-                let ScalarValueInner::Int32(right) = right.inner() else { unreachable!() };
+                let ScalarValue::Int32(left) = left else { unreachable!() };
+                let ScalarValue::Int32(right) = right else { unreachable!() };
                 
-                Ok(ScalarValueInner::Int32(left - right).into())
+                Ok(ScalarValue::Int32(left - right).into())
             },
             ArithmeticOp::Mul(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::INT32)?;
+                right.ttype_id().must_eq(&TTypeId::INT32)?;
 
                 let Value::Scalar(left) = left else { unreachable!() };
                 let Value::Scalar(right) = right else { unreachable!() };
 
-                let ScalarValueInner::Int32(left) = left.inner() else { unreachable!() };
-                let ScalarValueInner::Int32(right) = right.inner() else { unreachable!() };
+                let ScalarValue::Int32(left) = left else { unreachable!() };
+                let ScalarValue::Int32(right) = right else { unreachable!() };
                 
-                Ok(ScalarValueInner::Int32(left * right).into())
+                Ok(ScalarValue::Int32(left * right).into())
             },
             ArithmeticOp::Div(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
-                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
+                left.ttype_id().must_eq(&TTypeId::INT32)?;
+                right.ttype_id().must_eq(&TTypeId::INT32)?;
 
                 let Value::Scalar(left) = left else { unreachable!() };
                 let Value::Scalar(right) = right else { unreachable!() };
 
-                let ScalarValueInner::Int32(left) = left.inner() else { unreachable!() };
-                let ScalarValueInner::Int32(right) = right.inner() else { unreachable!() };
+                let ScalarValue::Int32(left) = left else { unreachable!() };
+                let ScalarValue::Int32(right) = right else { unreachable!() };
                 
-                Ok(ScalarValueInner::Int32(left / right).into())
+                Ok(ScalarValue::Int32(left / right).into())
             },
         }
     }
@@ -386,13 +383,13 @@ impl IfControlFlow {
     pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         let cond_type_id = self.condition.eval_types(registry, scopes)?;
 
-        registry.types().expect_type(&TTypeId::BOOL, &cond_type_id)?;
+        cond_type_id.must_eq(&TTypeId::BOOL)?;
         
         let then_type_id = self.then.eval_types(registry, scopes)?;
         let otherwise_type_id = self.then.eval_types(registry, scopes)?;
 
-        registry.types().expect_type(&self.ret_type, &then_type_id)?;
-        registry.types().expect_type(&self.ret_type, &otherwise_type_id)?;
+        then_type_id.must_eq(&self.ret_type)?;
+        otherwise_type_id.must_eq(&self.ret_type)?;
 
         Ok(then_type_id)
     }
@@ -400,7 +397,7 @@ impl IfControlFlow {
     pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
         let cond_value = self.condition.eval(registry, scopes)?;
                 
-        registry.types().expect_type(&TTypeId::BOOL, &cond_value.ttype_id())?;
+        cond_value.ttype_id().must_eq(&TTypeId::BOOL)?;
 
         if cond_value == Value::TRUE {
             self.then.eval(registry, scopes)
@@ -440,7 +437,8 @@ impl MatchControlFlow {
             return Ok(TTypeId::NEVER);
         }
         
-        let param_type = registry.types().get_by_id(&param_type_id)?;
+        let param_type = registry.ttype(&param_type_id)
+            .ok_or_else(|| TypeError::TypeNotFound(param_type_id.clone()))?;
 
         let TType::Composite(CompositeType::Enum(param_type)) = param_type else {
             return Err(TypeError::TypeInvalid {
@@ -483,17 +481,18 @@ impl MatchControlFlow {
 
             let branch_type_id = branch.expression.eval_types(registry, &new_scopes)?;
 
-            registry.types().expect_type(&self.ret_type, &branch_type_id)?;
+            branch_type_id.must_eq(&self.ret_type)?;
         }
         
         Ok(self.ret_type.clone())
     }
 
     pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        let scope_types = scopes.types(registry.types())?;
+        let scope_types = scopes.types()?;
         
         let param_type = self.param.eval_types(registry, &scope_types)?;
-        let param_type = registry.types().get_by_id(&param_type).map_err(|err| TypeError::from(err))?;
+        let param_type = registry.ttype(&param_type)
+            .ok_or_else(|| TypeError::from(TypeError::TypeNotFound(param_type.clone())))?;
         let TType::Composite(CompositeType::Enum(param_type)) = param_type else {
             return Err(TypeError::TypeInvalid {
                 expected: EnumType::new(btreemap! {}).into(),
@@ -515,11 +514,11 @@ impl MatchControlFlow {
             return Err(TypeError::UnknownTag(param_value.tag().clone()).into());
         };
 
-        let scope_type = TTypeId::Anonymous(Box::new(StructType::new(btreemap! {
+        let scope_type = TTypeId::new_anonymous(StructType::new(btreemap! {
             branch.ident.clone() => param_type.tags()[param_value.tag()].clone(),
-        }).into()));
+        }).into());
         
-        let new_scope = StructValue::new(registry.types(), scope_type, btreemap! {
+        let new_scope = StructValue::new(registry, scope_type, btreemap! {
             branch.ident.clone() => param_value.into_value(),
         })?;
 
@@ -566,7 +565,8 @@ impl FunctionInvocation {
     }
 
     pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
-        let function = registry.functions().get(&self.function)?;
+        let function = registry.function(&self.function)
+            .ok_or_else(|| TypeError::FunctionNotFound(self.function.clone()))?;
 
         let ret_type = function.result_type();
 
@@ -582,7 +582,7 @@ impl FunctionInvocation {
         for (arg, expression) in function.args().iter().zip(self.args.iter()) {
             let expression_type_id = expression.eval_types(registry, scopes)?;
 
-            registry.types().expect_type(&expression_type_id, arg.ttype_id())?;
+            arg.ttype_id().must_eq(&expression_type_id)?;
             
             if !arg_names.insert(arg.name()) {
                 return Err(TypeError::FunctionDuplicateArg {
@@ -595,7 +595,8 @@ impl FunctionInvocation {
     }
 
     pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        let function = registry.functions().get(&self.function).map_err(|err| TypeError::from(err))?;
+        let function = registry.function(&self.function).ok_or_else(
+            || TypeError::FunctionNotFound(self.function.clone()))?;
         let mut args = Vec::new();
 
         for arg in &self.args {
@@ -608,7 +609,7 @@ impl FunctionInvocation {
                 InterpreterFunctionAction::Panic => {
                     let message = args.get(0).map(|value| {
                         match value {
-                            Value::Scalar(scalar_value) => if let ScalarValueInner::String(string) = scalar_value.inner() {
+                            Value::Scalar(scalar_value) => if let ScalarValue::String(string) = scalar_value {
                                 string.clone()
                             } else {
                                 Default::default()
@@ -636,7 +637,7 @@ impl Debug for FunctionInvocation {
 
 #[cfg(test)]
 mod tests {
-    use crate::typesystem::value::{EnumLiteral, EnumValue, LiteralType, ScalarLiteralInner};
+    use crate::typesystem::value::EnumValue;
 
     use super::*;
 
@@ -644,38 +645,38 @@ mod tests {
     fn match_expr() {
         let registry = Registry::new();
 
-        let result_ttype = registry.types().get_id_by_name("Result").unwrap();
+        let result_ttype_id = TTypeId::from(id_path!("Result"));
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Value(EnumValue::new(
-                registry.types(), result_ttype.clone(),
+                &registry, result_ttype_id.clone(),
                 id!("Ok"),
-                ScalarValueInner::Unit.into()
+                ScalarValue::Unit.into()
             ).unwrap().into()),
             ret_type: TTypeId::INT32,
             branches: btreemap! {
                 id!("Ok") => Branch {
                     ident: id!("_"),
-                    expression: Expression::Value(ScalarValueInner::Int32(10).into()),
+                    expression: Expression::Value(ScalarValue::Int32(10).into()),
                 },
                 id!("Err") => Branch {
                     ident: id!("_"),
-                    expression: Expression::Value(ScalarValueInner::Int32(8).into()),
+                    expression: Expression::Value(ScalarValue::Int32(8).into()),
                 },
             },
         })));
 
         expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap();
-        assert_eq!(Value::Scalar(ScalarValueInner::Int32(10).into()), expr.eval(&registry, &ScopeValues::EMPTY).unwrap());
+        assert_eq!(Value::Scalar(ScalarValue::Int32(10).into()), expr.eval(&registry, &ScopeValues::EMPTY).unwrap());
 
         let expr = Expression::ControlFlow(Box::new(
             ControlFlow::Match(MatchControlFlow {
-                param: Expression::Value(EnumValue::new(registry.types(), result_ttype, id!("Ok"), ScalarValueInner::Unit.into()).unwrap().into()),
+                param: Expression::Value(EnumValue::new(&registry, result_ttype_id, id!("Ok"), ScalarValue::Unit.into()).unwrap().into()),
                 ret_type: TTypeId::INT32,
                 branches: btreemap! {
                     id!("Ok") => Branch {
                         ident: id!("_"),
-                        expression: Expression::Value(ScalarValueInner::Int32(10).into()),
+                        expression: Expression::Value(ScalarValue::Int32(10).into()),
                     },
                 },
             })
@@ -685,20 +686,18 @@ mod tests {
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Value(
-                EnumValue::from_literal(
-                    registry.types(),
-                    EnumLiteral {
-                        ttype: LiteralType::Name(id!("Result").into()),
-                        tag: id!("Err"),
-                        value: Box::new(ScalarLiteralInner::String("my_error".into()).into()),
-                    }
+                EnumValue::new(
+                    &registry,
+                    id_path!("Result").into(),
+                    id!("Err"),
+                    ScalarValue::String("my_error".into()).into(),
                 ).unwrap().into()
             ),
             ret_type: TTypeId::STRING,
             branches: btreemap! {
                 id!("Ok") => Branch {
                     ident: id!("_"),
-                    expression: Expression::Value(ScalarValueInner::String("Ok".into()).into()),
+                    expression: Expression::Value(ScalarValue::String("Ok".into()).into()),
                 },
                 id!("Err") => Branch {
                     ident: id!("error"),
@@ -708,7 +707,7 @@ mod tests {
         })));
 
         assert_eq!(TTypeId::Scalar(ScalarType::String), expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap());
-        assert_eq!(Value::Scalar(ScalarValueInner::String("my_error".into()).into()), expr.eval(&registry, &ScopeValues::EMPTY).unwrap());
+        assert_eq!(Value::Scalar(ScalarValue::String("my_error".into()).into()), expr.eval(&registry, &ScopeValues::EMPTY).unwrap());
     }
 
     #[test]
@@ -716,16 +715,14 @@ mod tests {
         let registry = Registry::new();
 
         let expr_panic = Expression::FunctionInvocation(FunctionInvocation {
-            function: id_path!("core::unwrap"),
+            function: id_path!("unwrap"),
             args: [
                 Expression::Value(
-                    EnumValue::from_literal(
-                        registry.types(),
-                        EnumLiteral {
-                            ttype: LiteralType::Name(id!("Result").into()),
-                            tag: id!("Err"),
-                            value: Box::new(ScalarLiteralInner::String("my_error".into()).into()),
-                        }
+                    EnumValue::new(
+                        &registry,
+                        id_path!("Result").into(),
+                        id!("Err"),
+                        ScalarValue::String("my_error".into()).into(),
                     ).unwrap().into()
                 ),
             ].into(),
@@ -734,19 +731,17 @@ mod tests {
         expr_panic.eval_types(&registry, &Default::default()).unwrap();
         let panic_err = expr_panic.eval(&registry, &Default::default()).unwrap_err();
 
-        assert_eq!(EvalError::Panic("".into()), panic_err);
+        assert_eq!(EvalError::Panic("my_error".into()), panic_err);
 
         let expr_pass = Expression::FunctionInvocation(FunctionInvocation {
-            function: id_path!("core::unwrap"),
+            function: id_path!("unwrap"),
             args: [
                 Expression::Value(
-                    EnumValue::from_literal(
-                        registry.types(),
-                        EnumLiteral {
-                            ttype: LiteralType::Name(id!("Result").into()),
-                            tag: id!("Ok"),
-                            value: Box::new(ScalarLiteralInner::Unit.into()),
-                        }
+                    EnumValue::new(
+                        &registry,
+                        id_path!("Result").into(),
+                        id!("Ok"),
+                        ScalarValue::Unit.into(),
                     ).unwrap().into()
                 ),
             ].into(),

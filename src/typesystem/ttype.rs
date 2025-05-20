@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt::Debug};
 
 use codb_core::{Ident, IdentTree};
 
-use crate::{registry::{TTypeId, TypeRegistry}};
+use crate::db::registry::{Registry, TTypeId};
 
 use super::TypeError;
 
@@ -13,22 +13,23 @@ pub enum TType {
 }
 
 impl TType {
+    pub const NEVER: TType = TType::Scalar(ScalarType::Never);
     pub const UNIT: TType = TType::Scalar(ScalarType::Unit);
     pub const BOOL: TType = TType::Scalar(ScalarType::Bool);
     pub const INT32: TType = TType::Scalar(ScalarType::Int32);
     pub const STRING: TType = TType::Scalar(ScalarType::String);
 
-    pub fn select(&self, type_registry: &TypeRegistry, trees: &[IdentTree]) -> Result<TType, TypeError> {
+    pub fn select(&self, registry: &Registry, trees: &[IdentTree]) -> Result<TType, TypeError> {
         match self {
-            TType::Composite(ttype) => Ok(TType::Composite(ttype.select(type_registry, trees)?)),
+            TType::Composite(ttype) => Ok(TType::Composite(ttype.select(registry, trees)?)),
             TType::Scalar(ttype) => Ok(TType::Scalar(ttype.select(trees)?)),
         }
     }
 
-    pub fn dot(&self, type_registry: &TypeRegistry, ident: &Ident) -> Result<&TTypeId, TypeError> {
+    pub fn dot(&self, ident: &Ident) -> Option<&TTypeId> {
         match self {
-            TType::Composite(ttype) => ttype.dot(type_registry, ident),
-            TType::Scalar(_) => Err(TypeError::ScalarField(ident.clone())),
+            TType::Composite(ttype) => ttype.dot(ident),
+            TType::Scalar(_) => None,
         }
     }
 }
@@ -73,17 +74,17 @@ pub enum CompositeType {
 }
 
 impl CompositeType {
-    pub fn select(&self, type_registry: &TypeRegistry, ident_trees: &[IdentTree]) -> Result<CompositeType, TypeError> {
+    pub fn select(&self, registry: &Registry, ident_trees: &[IdentTree]) -> Result<CompositeType, TypeError> {
         match self {
-            CompositeType::Struct(ttype) => Ok(CompositeType::Struct(ttype.select(type_registry, ident_trees)?)),
+            CompositeType::Struct(ttype) => Ok(CompositeType::Struct(ttype.select(registry, ident_trees)?)),
             CompositeType::Enum(ttype) => Ok(CompositeType::Enum(ttype.select(ident_trees)?)),
         }
     }
 
-    pub fn dot(&self, type_registry: &TypeRegistry, ident: &Ident) -> Result<&TTypeId, TypeError> {
+    pub fn dot(&self, ident: &Ident) -> Option<&TTypeId> {
         match self {
-            CompositeType::Struct(ttype) => ttype.dot(type_registry, ident),
-            CompositeType::Enum(_) => Err(TypeError::DotTag(ident.clone())),
+            CompositeType::Struct(ttype) => ttype.dot(ident),
+            CompositeType::Enum(_) => None,
         }
     }
 }
@@ -125,7 +126,7 @@ impl StructType {
         &self.fields
     }
 
-    pub fn select(&self, type_registry: &TypeRegistry, ident_trees: &[IdentTree]) -> Result<StructType, TypeError> {
+    pub fn select(&self, registry: &Registry, ident_trees: &[IdentTree]) -> Result<StructType, TypeError> {
         if ident_trees.is_empty() {
             return Ok(self.clone());
         }
@@ -136,10 +137,11 @@ impl StructType {
             let ident = tree.ident().clone();
 
             if let Some(ttype_id) = self.fields.get(&ident) {
-                let field_type = type_registry.get_by_id(ttype_id)?;
+                let field_type = registry.ttype(ttype_id)
+                    .ok_or_else(|| TypeError::TypeNotFound(ttype_id.clone()))?;
 
                 new_fields.insert(ident, TTypeId::new_anonymous(
-                    field_type.select(type_registry, tree.children())?
+                    field_type.select(registry, tree.children())?
                 ));
             } else {
                 return Err(TypeError::UnknownField(ident));
@@ -151,11 +153,11 @@ impl StructType {
         })
     }
 
-    pub fn dot(&self, type_registry: &TypeRegistry, ident: &Ident) -> Result<&TTypeId, TypeError> {
+    pub fn dot(&self, ident: &Ident) -> Option<&TTypeId> {
         if let Some(ttype_id) = self.fields.get(ident)  {
-            Ok(ttype_id)
+            Some(ttype_id)
         } else {
-            Err(TypeError::MissingField(ident.clone()))
+            None
         }
     }
 }

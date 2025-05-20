@@ -5,7 +5,7 @@ use either::Either;
 use itertools::Itertools;
 use ron::ser::PrettyConfig;
 
-use crate::{registry::Registry, relation::memory::MemoryRelation, typesystem::{value::Value, TypeError}};
+use crate::{db::registry::Registry, relation::memory::MemoryRelation, typesystem::{value::Value, TypeError}};
 
 use super::{Relation, RelationRef, Row, Schema};
 
@@ -115,22 +115,22 @@ impl Relation for FileRelation {
 mod tests {
     use itertools::Itertools;
 
-    use crate::{registry::TTypeId, typesystem::{ttype::StructType, value::{CompositeValue, ScalarValue, ScalarValueInner, StructValue}}};
+    use crate::{db::registry::TTypeId, typesystem::{ttype::StructType, value::{CompositeValue, ScalarValue, StructValue}}};
 
     use super::*;
 
     #[test]
     fn file_relation() {
         fn new_user(registry: &Registry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
-            StructValue::new(registry.types(), user_ttype_id.clone(), btreemap! {
-                id!("id") => ScalarValue::new(registry.types(), TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
-                id!("active") => ScalarValueInner::Bool(active).into(),
+            StructValue::new(registry, user_ttype_id.clone(), btreemap! {
+                id!("id") => ScalarValue::Int32(id).into(),
+                id!("active") => ScalarValue::Bool(active).into(),
             }).unwrap().into()
         }
 
         fn new_id(registry: &Registry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
-            StructValue::new(registry.types(), user_id_ttype_id.clone(), btreemap! {
-                id!("id") => ScalarValue::new(registry.types(), TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
+            StructValue::new(registry, user_id_ttype_id.clone(), btreemap! {
+                id!("id") => ScalarValue::Int32(id).into(),
             }).unwrap().into()
         }
 
@@ -160,17 +160,17 @@ mod tests {
             id!("active") => TTypeId::BOOL,
         });
 
-        let user_ttype_id = TTypeId::Anonymous(Box::new(user_struct.clone().into()));
+        let user_ttype_id = TTypeId::new_anonymous(user_struct.clone().into());
 
         let user_id_struct = user_struct.select(
-            registry.types(),
+            &registry,
             &IdentTree::from_nested_idents([id!("id").into()])
         ).unwrap();
 
-        let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_id_struct.clone().into()));
+        let user_id_ttype_id = TTypeId::new_anonymous(user_id_struct.clone().into());
         
         let user_pkey = IdentTree::from_nested_idents([id!("id").into()]);
-        let user_schema = Schema::new(registry.types(), user_struct, user_pkey).unwrap();
+        let user_schema = Schema::new(&registry, user_struct, user_pkey).unwrap();
 
         const USERS_PATH: &str = "target/test_file_relation_users_relation.ron";
         const INACTIVE_USERS_PATH: &str = "target/test_file_relation_inactive_users_relation.ron";
@@ -190,7 +190,7 @@ mod tests {
                 let Value::Composite(CompositeValue::Struct(value)) = row.clone() else { unreachable!() };
 
                 value.fields().get("active")
-                    .filter(|value| **value == Value::Scalar(ScalarValueInner::Bool(false).into()))
+                    .filter(|value| **value == Value::Scalar(ScalarValue::Bool(false).into()))
                     .map(|_| row)
             });
         

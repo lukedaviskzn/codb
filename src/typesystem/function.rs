@@ -2,7 +2,7 @@ use std::{borrow::Cow, fmt::Debug};
 
 use codb_core::Ident;
 
-use crate::{expr::{EvalError, Expression}, registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}};
+use crate::{db::registry::{Registry, TTypeId}, expr::{EvalError, Expression}, scope::{ScopeTypes, ScopeValues}};
 
 use super::{ttype::StructType, value::{StructValue, Value}, TypeError};
 
@@ -49,7 +49,7 @@ impl UserFunction {
 
         let expression_type_id = expression.eval_types(registry, &arg_scope)?;
 
-        registry.types().expect_type(&result_type_id, &expression_type_id)?;
+        expression_type_id.must_eq(&result_type_id)?;
 
         Ok(UserFunction {
             args,
@@ -85,8 +85,8 @@ impl UserFunction {
 
         let arg_types = StructType::new(arg_types);
         let arg_values = StructValue::new(
-            registry.types(),
-            TTypeId::Anonymous(Box::new(arg_types.clone().into())),
+            registry,
+            TTypeId::new_anonymous(arg_types.clone().into()),
             arg_values,
         )?;
 
@@ -163,12 +163,12 @@ pub struct InterpreterFunction {
 }
 
 impl InterpreterFunction {
-    pub fn new<T: Into<FunctionArg>>(args: impl IntoIterator<Item = T>, result_type_id: TTypeId, action: InterpreterFunctionAction) -> Result<InterpreterFunction, TypeError> {
-        Ok(InterpreterFunction {
+    pub fn new<T: Into<FunctionArg>>(args: impl IntoIterator<Item = T>, result_type_id: TTypeId, action: InterpreterFunctionAction) -> InterpreterFunction {
+        InterpreterFunction {
             args: args.into_iter().map(|arg| arg.into()).collect(),
             result_type_id,
             action,
-        })
+        }
     }
 
     pub fn args(&self) -> &[FunctionArg] {
