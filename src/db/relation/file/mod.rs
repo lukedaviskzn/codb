@@ -5,9 +5,9 @@ use either::Either;
 use itertools::Itertools;
 use ron::ser::PrettyConfig;
 
-use crate::{db::registry::Registry, relation::memory::MemoryRelation, typesystem::{value::Value, TypeError}};
+use crate::{db::registry::Registry, typesystem::{value::Value, TypeError}};
 
-use super::{Relation, RelationRef, Row, Schema};
+use super::{memory::MemoryRelation, Relation, RelationRef, Row, Schema};
 
 #[derive(Debug)]
 pub struct FileRelation {

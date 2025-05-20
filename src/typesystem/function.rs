@@ -2,7 +2,7 @@ use std::{borrow::Cow, fmt::Debug};
 
 use codb_core::Ident;
 
-use crate::{db::registry::{Registry, TTypeId}, expr::{EvalError, Expression}, scope::{ScopeTypes, ScopeValues}};
+use crate::{db::registry::{Registry, TTypeId}, expression::{EvalError, Expression}, scope::{ScopeTypes, ScopeValues}};
 
 use super::{ttype::StructType, value::{StructValue, Value}, TypeError};
 

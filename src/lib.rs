@@ -1,6 +1,5 @@
-mod relation;
 mod typesystem;
-mod expr;
+mod expression;
 mod scope;
 mod db;
 mod query;

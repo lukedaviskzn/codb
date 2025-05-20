@@ -1,10 +1,10 @@
 use std::fmt::Debug;
 
-use codb_core::{Ident, IdentPath};
+use codb_core::{Ident, IdentPath, NestedIdent};
 use ttype::TType;
 use value::Value;
 
-use crate::db::registry::TTypeId;
+use crate::{db::registry::TTypeId};
 
 pub mod ttype;
 pub mod value;
@@ -53,6 +53,8 @@ pub enum TypeError {
     FunctionDuplicateArg {
         arg: Ident,
     },
+    // #[error("{0}")]
+    // FieldNotFound(#[from] FieldNotFoundOn),
     #[error("type `{0:?}` not found")]
     TypeNotFound(TTypeId),
     #[error("function `{0:?}` not found")]

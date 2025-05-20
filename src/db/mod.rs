@@ -2,10 +2,12 @@ use std::{borrow::Cow, collections::HashMap, sync::RwLock};
 
 use codb_core::Ident;
 use registry::{Registry, TTypeId};
+use relation::Relation;
 
-use crate::{query::{DataQuery, Query}, relation::Relation, scope::{ScopeTypes, ScopeValues}, typesystem::{ttype::StructType, value::{StructValue, Value}}};
+use crate::{query::{DataQuery, Query}, scope::{ScopeTypes, ScopeValues}, typesystem::{ttype::StructType, value::{StructValue, Value}}};
 
 pub mod registry;
+pub mod relation;
 
 // DB
 // |
@@ -164,9 +166,9 @@ mod tests {
 
     use codb_core::IdentTree;
 
-    use crate::{relation::{memory::MemoryRelation, RelationRef, Schema}, typesystem::value::ScalarValue};
+    use crate::typesystem::value::ScalarValue;
 
-    use super::*;
+    use super::{relation::{memory::MemoryRelation, RelationRef, Schema}, *};
 
     fn create_db() -> Db<MemoryRelation> {
         let db = Db::<MemoryRelation>::new();

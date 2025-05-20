@@ -2,7 +2,7 @@ use std::ops::Bound;
 
 use codb_core::{Ident, IdentTree};
 
-use crate::{expr::Expression, relation::{PKey, Row}, typesystem::value::Value};
+use crate::{expression::Expression, db::relation::{PKey, Row}, typesystem::value::Value};
 
 pub enum Query {
     Data(DataQuery),

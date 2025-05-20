@@ -42,7 +42,7 @@ impl<'a> ScopeTypes<'a> {
     }
 
     pub fn get_nested(&self, registry: &Registry, nested_ident: &NestedIdent) -> Result<TTypeId, TypeError> {
-        let first = nested_ident.first();
+        let (first, rest) = nested_ident.split_first();
         
         let mut ttype_id = None;
 
@@ -52,16 +52,13 @@ impl<'a> ScopeTypes<'a> {
             }
         }
 
-        let ttype_id = ttype_id.unwrap(); // todo: fix unwrap
+        let ttype_id = ttype_id.ok_or_else(|| TypeError::MissingField(first.clone()))?;
         let mut ttype_id = ttype_id.clone();
 
-        let mut ident_list = nested_ident.iter();
-        ident_list.next();
-        
-        for ident in ident_list {
+        for ident in rest {
             ttype_id = registry.ttype(&ttype_id)
                 .ok_or_else(|| TypeError::TypeNotFound(ttype_id.clone()))?
-                .dot(ident).unwrap() // todo: fix unwrap
+                .dot(ident).ok_or_else(|| TypeError::MissingField(ident.clone()))?
                 .clone();
         }
 
