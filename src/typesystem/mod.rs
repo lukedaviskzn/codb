@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use codb_core::{Ident, IdentPath, NestedIdent};
+use codb_core::{Ident, IdentPath};
 use ttype::TType;
 use value::Value;
 

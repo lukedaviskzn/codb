@@ -58,6 +58,7 @@ pub trait RelationRef {
 pub trait Relation: RelationRef {
     fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<io::Result<bool>, TypeError>;
     
+    #[allow(unused)]
     fn extend(&mut self, registry: &Registry, new_rows: impl IntoIterator<Item = Row>) -> Result<io::Result<RowSize>, TypeError> {
         let mut count = 0;
         for new_row in new_rows {
@@ -86,6 +87,7 @@ pub struct Schema {
 }
 
 impl Schema {
+    #[allow(unused)]
     pub fn new(registry: &Registry, ttype: StructType, pkey: impl Into<Box<[IdentTree]>>) -> Result<Schema, SchemaError> {
         let pkey = pkey.into();
         
@@ -99,6 +101,7 @@ impl Schema {
         })
     }
 
+    #[allow(unused)]
     pub fn ttype(&self) -> &StructType {
         &self.ttype
     }
@@ -111,6 +114,7 @@ impl Schema {
         self.ttype.select(registry, &self.pkey)
     }
 
+    #[allow(unused)]
     pub fn pkey(&self) -> &[IdentTree] {
         &self.pkey
     }

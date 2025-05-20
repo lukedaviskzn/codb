@@ -51,8 +51,8 @@ impl LogicalOp {
                 let left_type_id = left.eval_types(registry, scopes)?;
                 let right_type_id = right.eval_types(registry, scopes)?;
 
-                left_type_id.must_eq(&TTypeId::BOOL)?;
-                right_type_id.must_eq(&TTypeId::BOOL)?;
+                left_type_id.must_eq(&TTypeId::INT32)?;
+                right_type_id.must_eq(&TTypeId::INT32)?;
 
                 Ok(TTypeId::BOOL)
             },
@@ -67,7 +67,7 @@ impl LogicalOp {
             LogicalOp::Not(expr) => {
                 let expr_type_id = expr.eval_types(registry, scopes)?;
 
-                expr_type_id.must_eq(&TTypeId::BOOL);
+                expr_type_id.must_eq(&TTypeId::BOOL)?;
                 
                 Ok(TTypeId::BOOL)
             },
@@ -105,7 +105,7 @@ impl LogicalOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                right.ttype_id().must_eq(&left.ttype_id());
+                right.ttype_id().must_eq(&left.ttype_id())?;
                 
                 Ok(ScalarValue::Bool(left == right).into())
             },

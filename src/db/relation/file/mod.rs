@@ -16,6 +16,7 @@ pub struct FileRelation {
 }
 
 impl FileRelation {
+    #[allow(unused)]
     pub fn new(schema: Schema, filepath: impl Into<PathBuf>) -> io::Result<FileRelation> {
         let filepath = Into::<PathBuf>::into(filepath);
 
@@ -28,6 +29,7 @@ impl FileRelation {
         })
     }
 
+    #[allow(unused)]
     pub fn open(filepath: impl Into<PathBuf>) -> io::Result<FileRelation> {
         let filepath: PathBuf = filepath.into();
         let relation = read_mem_relation(&filepath)?;

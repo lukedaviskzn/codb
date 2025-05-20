@@ -49,11 +49,11 @@ impl RelationRef for MemoryRelation {
         let selected_type_id = TTypeId::new_anonymous(selected_type.clone().into());
 
         if let Bound::Included(bound) | Bound::Excluded(bound) = range.start_bound() {
-            bound.ttype_id().must_eq(&selected_type_id);
+            bound.ttype_id().must_eq(&selected_type_id)?;
         }
         
         if let Bound::Included(bound) | Bound::Excluded(bound) = range.end_bound() {
-            bound.ttype_id().must_eq(&selected_type_id);
+            bound.ttype_id().must_eq(&selected_type_id)?;
         }
 
         if selected_type.eq(&self.schema.pkey_ttype(registry)?) {

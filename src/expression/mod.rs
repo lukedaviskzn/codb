@@ -1,8 +1,8 @@
-use std::{borrow::Cow, collections::{BTreeMap, HashSet}, fmt::{Debug, Display}};
+use std::fmt::{Debug, Display};
 
-use codb_core::{Ident, IdentPath, NestedIdent};
+use codb_core::NestedIdent;
 
-use crate::{db::registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}, typesystem::{function::{FunctionEntry, InterpreterFunctionAction}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, ScalarValue, StructValue, Value}, TypeError}};
+use crate::{db::registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}, typesystem::{value::Value, TypeError}};
 
 mod logical_op;
 mod arithmetic_op;

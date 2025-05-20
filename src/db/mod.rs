@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, sync::RwLock};
+use std::{borrow::Cow, collections::BTreeMap, sync::RwLock};
 
 use codb_core::Ident;
 use registry::{Registry, TTypeId};
@@ -19,17 +19,20 @@ pub mod relation;
 // |                    \
 // v                     v
 // Lock(Relation A)   Lock(Relation B)
+    #[allow(unused)]
 pub struct Db<R: Relation> {
     inner: RwLock<DbInner<R>>,
 }
 
 impl<R: Relation> Db<R> {
+    #[allow(unused)]
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(DbInner::new()),
         }
     }
 
+    #[allow(unused)]
     pub fn execute(&self, query: Query) {
         match query {
             Query::Data(query) => match query {
@@ -135,14 +138,14 @@ impl<R: Relation> Db<R> {
 
 pub struct DbInner<R: Relation> {
     registry: Registry,
-    relations: RwLock<HashMap<Ident, RwLock<R>>>,
+    relations: RwLock<BTreeMap<Ident, RwLock<R>>>,
 }
 
 impl<R: Relation> DbInner<R> {
     fn new() -> Self {
         Self {
             registry: Registry::new(),
-            relations: RwLock::new(HashMap::new()),
+            relations: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -150,11 +153,13 @@ impl<R: Relation> DbInner<R> {
         &self.registry
     }
 
+    #[allow(unused)]
     pub fn registry_mut(&mut self) -> &mut Registry {
         &mut self.registry
     }
 
-    pub fn relations(&self) -> &RwLock<HashMap<Ident, RwLock<R>>> {
+    #[allow(unused)]
+    pub fn relations(&self) -> &RwLock<BTreeMap<Ident, RwLock<R>>> {
         &self.relations
     }
 }
@@ -174,9 +179,7 @@ mod tests {
         let db = Db::<MemoryRelation>::new();
         
         {
-            let mut db_inner = db.inner.write().unwrap();
-        
-            let registry = db_inner.registry_mut();
+            let db_inner = db.inner.read().unwrap();
             
             let my_type = StructType::new(btreemap! {
                 id!("id") => TTypeId::INT32,
@@ -217,9 +220,7 @@ mod tests {
     #[test]
     fn test() {
         let db = Db::<MemoryRelation>::new();
-        let mut db = db.inner.write().unwrap();
-        
-        let registry = db.registry_mut();
+        let db = db.inner.read().unwrap();
         
         let my_type = StructType::new(btreemap! {
             id!("id") => TTypeId::INT32,

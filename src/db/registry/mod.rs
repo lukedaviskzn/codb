@@ -104,6 +104,7 @@ pub struct Registry {
 }
 
 impl Registry {
+    #[allow(unused)]
     pub fn new() -> Registry {
         let mut registry = Registry {
             root: Module::new(),
@@ -160,6 +161,7 @@ impl Registry {
         Some(module)
     }
 
+    #[allow(unused)]
     pub fn module_mut(&mut self, path: &[Ident]) -> Option<&mut Module> {
         let mut module = &mut self.root;
 

@@ -43,52 +43,10 @@ impl ArithmeticOp {
     }
 
     pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        match self {
-            ArithmeticOp::Add(left, right) => {
-                let left = left.eval(registry, scopes)?;
-                let right = right.eval(registry, scopes)?;
-                
-                left.ttype_id().must_eq(&TTypeId::INT32)?;
-                right.ttype_id().must_eq(&TTypeId::INT32)?;
-
-                let Value::Scalar(left) = left else { unreachable!() };
-                let Value::Scalar(right) = right else { unreachable!() };
-
-                let ScalarValue::Int32(left) = left else { unreachable!() };
-                let ScalarValue::Int32(right) = right else { unreachable!() };
-                
-                Ok(ScalarValue::Int32(left + right).into())
-            },
-            ArithmeticOp::Sub(left, right) => {
-                let left = left.eval(registry, scopes)?;
-                let right = right.eval(registry, scopes)?;
-                
-                left.ttype_id().must_eq(&TTypeId::INT32)?;
-                right.ttype_id().must_eq(&TTypeId::INT32)?;
-
-                let Value::Scalar(left) = left else { unreachable!() };
-                let Value::Scalar(right) = right else { unreachable!() };
-
-                let ScalarValue::Int32(left) = left else { unreachable!() };
-                let ScalarValue::Int32(right) = right else { unreachable!() };
-                
-                Ok(ScalarValue::Int32(left - right).into())
-            },
-            ArithmeticOp::Mul(left, right) => {
-                let left = left.eval(registry, scopes)?;
-                let right = right.eval(registry, scopes)?;
-                
-                left.ttype_id().must_eq(&TTypeId::INT32)?;
-                right.ttype_id().must_eq(&TTypeId::INT32)?;
-
-                let Value::Scalar(left) = left else { unreachable!() };
-                let Value::Scalar(right) = right else { unreachable!() };
-
-                let ScalarValue::Int32(left) = left else { unreachable!() };
-                let ScalarValue::Int32(right) = right else { unreachable!() };
-                
-                Ok(ScalarValue::Int32(left * right).into())
-            },
+        let (left, right) = match self {
+            ArithmeticOp::Add(left, right) |
+            ArithmeticOp::Sub(left, right) |
+            ArithmeticOp::Mul(left, right) |
             ArithmeticOp::Div(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
@@ -96,14 +54,18 @@ impl ArithmeticOp {
                 left.ttype_id().must_eq(&TTypeId::INT32)?;
                 right.ttype_id().must_eq(&TTypeId::INT32)?;
 
-                let Value::Scalar(left) = left else { unreachable!() };
-                let Value::Scalar(right) = right else { unreachable!() };
+                let Value::Scalar(ScalarValue::Int32(left)) = left else { unreachable!() };
+                let Value::Scalar(ScalarValue::Int32(right)) = right else { unreachable!() };
 
-                let ScalarValue::Int32(left) = left else { unreachable!() };
-                let ScalarValue::Int32(right) = right else { unreachable!() };
-                
-                Ok(ScalarValue::Int32(left / right).into())
-            },
+                (left, right)
+            }
+        };
+        
+        match self {
+            ArithmeticOp::Add(_, _) => Ok(ScalarValue::Int32(left + right).into()),
+            ArithmeticOp::Sub(_, _) => Ok(ScalarValue::Int32(left - right).into()),
+            ArithmeticOp::Mul(_, _) => Ok(ScalarValue::Int32(left * right).into()),
+            ArithmeticOp::Div(_, _) => Ok(ScalarValue::Int32(left / right).into()),
         }
     }
 }

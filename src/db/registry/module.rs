@@ -47,12 +47,14 @@ pub struct Module {
 }
 
 impl Module {
+    #[allow(unused)]
     pub fn new() -> Module {
         Module {
             items: btreemap! {},
         }
     }
 
+    #[allow(unused)]
     pub fn item(&self, ident: &Ident) -> Option<&ModuleItem> {
         self.items.get(ident)
     }

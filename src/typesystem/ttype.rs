@@ -13,10 +13,15 @@ pub enum TType {
 }
 
 impl TType {
+    #[allow(unused)]
     pub const NEVER: TType = TType::Scalar(ScalarType::Never);
+    #[allow(unused)]
     pub const UNIT: TType = TType::Scalar(ScalarType::Unit);
+    #[allow(unused)]
     pub const BOOL: TType = TType::Scalar(ScalarType::Bool);
+    #[allow(unused)]
     pub const INT32: TType = TType::Scalar(ScalarType::Int32);
+    #[allow(unused)]
     pub const STRING: TType = TType::Scalar(ScalarType::String);
 
     pub fn select(&self, registry: &Registry, trees: &[IdentTree]) -> Result<TType, TypeError> {
