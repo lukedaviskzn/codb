@@ -1,9 +1,10 @@
 use std::fmt::Debug;
 
+use codb_core::Ident;
 use ttype::TType;
 use value::{Value, Literal};
 
-use crate::{idents::Ident, registry::{FunctionRegistryError, TypeRegistryError}};
+use crate::{registry::{FunctionRegistryError, TypeRegistryError}};
 
 pub mod ttype;
 pub mod value;

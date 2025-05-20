@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, fmt::{Debug, Display}};
 
-use crate::{idents::{Ident, IdentTree}, registry::{TTypeId, TypeRegistry}, typesystem::{ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, TypeError}};
+use codb_core::{Ident, IdentTree};
+
+use crate::{registry::{TTypeId, TypeRegistry}, typesystem::{ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, TypeError}};
 
 use super::{CompositeLiteral, EnumLiteral, Literal, LiteralType, ScalarLiteral, ScalarLiteralInner, StructLiteral};
 

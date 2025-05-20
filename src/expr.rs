@@ -1,6 +1,8 @@
 use std::{borrow::Cow, collections::{BTreeMap, HashSet}, fmt::{Debug, Display}};
 
-use crate::{idents::{Ident, IdentPath, NestedIdent}, registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}, typesystem::{function::{FunctionEntry, InterpreterFunctionAction}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, LiteralType, ScalarValue, ScalarValueInner, StructLiteral, StructValue, Value}, TypeError}};
+use codb_core::{Ident, IdentPath, NestedIdent};
+
+use crate::{registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}, typesystem::{function::{FunctionEntry, InterpreterFunctionAction}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, ScalarValueInner, StructValue, Value}, TypeError}};
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EvalError {
@@ -647,17 +649,17 @@ mod tests {
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Value(EnumValue::new(
                 registry.types(), result_ttype.clone(),
-                "Ok".parse().unwrap(),
+                id!("Ok"),
                 ScalarValueInner::Unit.into()
             ).unwrap().into()),
             ret_type: TTypeId::INT32,
             branches: btreemap! {
-                "Ok".parse().unwrap() => Branch {
-                    ident: "_".parse().unwrap(),
+                id!("Ok") => Branch {
+                    ident: id!("_"),
                     expression: Expression::Value(ScalarValueInner::Int32(10).into()),
                 },
-                "Err".parse().unwrap() => Branch {
-                    ident: "_".parse().unwrap(),
+                id!("Err") => Branch {
+                    ident: id!("_"),
                     expression: Expression::Value(ScalarValueInner::Int32(8).into()),
                 },
             },
@@ -668,39 +670,39 @@ mod tests {
 
         let expr = Expression::ControlFlow(Box::new(
             ControlFlow::Match(MatchControlFlow {
-                param: Expression::Value(EnumValue::new(registry.types(), result_ttype, "Ok".parse().unwrap(), ScalarValueInner::Unit.into()).unwrap().into()),
+                param: Expression::Value(EnumValue::new(registry.types(), result_ttype, id!("Ok"), ScalarValueInner::Unit.into()).unwrap().into()),
                 ret_type: TTypeId::INT32,
                 branches: btreemap! {
-                    "Ok".parse().unwrap() => Branch {
-                        ident: "_".parse().unwrap(),
+                    id!("Ok") => Branch {
+                        ident: id!("_"),
                         expression: Expression::Value(ScalarValueInner::Int32(10).into()),
                     },
                 },
             })
         ));
 
-        assert_eq!(TypeError::MissingTag("Err".parse().unwrap()), expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap_err());
+        assert_eq!(TypeError::MissingTag(id!("Err")), expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap_err());
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Value(
                 EnumValue::from_literal(
                     registry.types(),
                     EnumLiteral {
-                        ttype: LiteralType::Name("Result".parse().expect("unreachable")),
-                        tag: "Err".parse().expect("unreachable"),
+                        ttype: LiteralType::Name(id!("Result").into()),
+                        tag: id!("Err"),
                         value: Box::new(ScalarLiteralInner::String("my_error".into()).into()),
                     }
                 ).unwrap().into()
             ),
             ret_type: TTypeId::STRING,
             branches: btreemap! {
-                "Ok".parse().unwrap() => Branch {
-                    ident: "_".parse().unwrap(),
+                id!("Ok") => Branch {
+                    ident: id!("_"),
                     expression: Expression::Value(ScalarValueInner::String("Ok".into()).into()),
                 },
-                "Err".parse().unwrap() => Branch {
-                    ident: "error".parse().unwrap(),
-                    expression: Expression::NestedIdent("error".parse().unwrap()),
+                id!("Err") => Branch {
+                    ident: id!("error"),
+                    expression: Expression::NestedIdent(id!("error").into()),
                 },
             },
         })));
@@ -714,14 +716,14 @@ mod tests {
         let registry = Registry::new();
 
         let expr_panic = Expression::FunctionInvocation(FunctionInvocation {
-            function: "core::unwrap".parse().unwrap(),
+            function: id_path!("core::unwrap"),
             args: [
                 Expression::Value(
                     EnumValue::from_literal(
                         registry.types(),
                         EnumLiteral {
-                            ttype: LiteralType::Name("Result".parse().expect("unreachable")),
-                            tag: "Err".parse().expect("unreachable"),
+                            ttype: LiteralType::Name(id!("Result").into()),
+                            tag: id!("Err"),
                             value: Box::new(ScalarLiteralInner::String("my_error".into()).into()),
                         }
                     ).unwrap().into()
@@ -735,14 +737,14 @@ mod tests {
         assert_eq!(EvalError::Panic("".into()), panic_err);
 
         let expr_pass = Expression::FunctionInvocation(FunctionInvocation {
-            function: "core::unwrap".parse().unwrap(),
+            function: id_path!("core::unwrap"),
             args: [
                 Expression::Value(
                     EnumValue::from_literal(
                         registry.types(),
                         EnumLiteral {
-                            ttype: LiteralType::Name("Result".parse().expect("unreachable")),
-                            tag: "Ok".parse().expect("unreachable"),
+                            ttype: LiteralType::Name(id!("Result").into()),
+                            tag: id!("Ok"),
                             value: Box::new(ScalarLiteralInner::Unit.into()),
                         }
                     ).unwrap().into()

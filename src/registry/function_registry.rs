@@ -1,8 +1,10 @@
 use std::{collections::BTreeMap, fmt::Debug};
 
-use crate::{idents::{Ident, IdentPath}, typesystem::function::{FunctionArg, FunctionEntry, InterpreterFunction, InterpreterFunctionAction, UserFunction}};
+use codb_core::IdentPath;
 
-use super::{Registry, TTypeId, TypeRegistry};
+use crate::{typesystem::function::{FunctionArg, FunctionEntry, InterpreterFunction, InterpreterFunctionAction, UserFunction}};
+
+use super::TTypeId;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FunctionRegistryError {
@@ -21,7 +23,7 @@ impl FunctionRegistry {
     pub fn new() -> FunctionRegistry {
         let function_panic = InterpreterFunction::new(
             vec![
-                FunctionArg::new("string".parse().expect("not an ident"), TTypeId::STRING),
+                FunctionArg::new(id!("string"), TTypeId::STRING),
             ],
             TTypeId::NEVER,
             InterpreterFunctionAction::Panic,
@@ -29,7 +31,7 @@ impl FunctionRegistry {
         
         let function_registry = FunctionRegistry {
             core_functions: btreemap! {
-                "core::panic".parse().expect("not an ident") => function_panic,
+                id_path!("core::panic") => function_panic,
             },
             functions: btreemap! {},
         };

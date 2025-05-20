@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, fmt::Debug};
 
-use crate::{idents::Ident, typesystem::ttype::{CompositeType, ScalarType}};
+use codb_core::Ident;
+
+use crate::{typesystem::ttype::{CompositeType, ScalarType}};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum LiteralType {

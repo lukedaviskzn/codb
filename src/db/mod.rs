@@ -1,6 +1,8 @@
 use std::{borrow::Cow, collections::HashMap, sync::RwLock};
 
-use crate::{idents::Ident, query::{DataQuery, Query}, registry::{Registry, TTypeId, TypeRegistry}, relation::Relation, scope::{ScopeTypes, ScopeValues}, typesystem::{ttype::{StructType, TType}, value::{StructValue, Value}}};
+use codb_core::Ident;
+
+use crate::{query::{DataQuery, Query}, registry::{Registry, TTypeId}, relation::Relation, scope::{ScopeTypes, ScopeValues}, typesystem::{ttype::StructType, value::{StructValue, Value}}};
 
 // DB
 // |
@@ -98,7 +100,7 @@ impl<R: Relation> Db<R> {
                     let mut relation = relations.get(&relation).unwrap().write().unwrap();
 
                     let scope = StructType::new(btreemap! {
-                        "row".parse().unwrap() => relation.schema().ttype_id(),
+                        id!("row") => relation.schema().ttype_id(),
                     });
 
                     let scope_type_id = TTypeId::Anonymous(Box::new(scope.clone().into()));
@@ -110,7 +112,7 @@ impl<R: Relation> Db<R> {
                     
                     let rows_removed = relation.retain(|row| {
                         let scope = StructValue::new(registry.types(), scope_type_id.clone(), btreemap! {
-                            "row".parse().unwrap() => row.clone(),
+                            id!("row") => row.clone(),
                         }).unwrap();
 
                         let scopes = ScopeValues::one(Cow::Owned(scope));
@@ -157,7 +159,9 @@ mod tests {
     use core::panic;
     use std::ops::Bound;
 
-    use crate::{idents::IdentTree, relation::{memory::MemoryRelation, RelationRef, Schema}, typesystem::value::ScalarValueInner};
+    use codb_core::IdentTree;
+
+    use crate::{relation::{memory::MemoryRelation, RelationRef, Schema}, typesystem::value::ScalarValueInner};
 
     use super::*;
 
@@ -170,34 +174,34 @@ mod tests {
             let registry = db_inner.registry_mut();
             
             let my_type = StructType::new(btreemap! {
-                "id".parse().unwrap() => TTypeId::INT32,
-                "name".parse().unwrap() => TTypeId::STRING,
-                "active".parse().unwrap() => TTypeId::BOOL,
+                id!("id") => TTypeId::INT32,
+                id!("name") => TTypeId::STRING,
+                id!("active") => TTypeId::BOOL,
             });
 
             let mut relations = db_inner.relations().write().unwrap();
 
             let registry = db_inner.registry();
             
-            relations.insert("Rel".parse().unwrap(), RwLock::new(MemoryRelation::new(
-                Schema::new(registry.types(), my_type.clone(), IdentTree::from_nested_idents(["id".parse().unwrap()])).unwrap()
+            relations.insert(id!("Rel"), RwLock::new(MemoryRelation::new(
+                Schema::new(registry.types(), my_type.clone(), IdentTree::from_nested_idents([id!("id").into()])).unwrap()
             )));
 
             relations.get("Rel").unwrap().write().unwrap().extend(&registry, [
                 StructValue::new(registry.types(), TTypeId::new_anonymous(my_type.clone().into()), btreemap! {
-                    "id".parse().unwrap() => Value::Scalar(ScalarValueInner::Int32(1).into()),
-                    "name".parse().unwrap() => Value::Scalar(ScalarValueInner::String("Jim Jones".into()).into()),
-                    "active".parse().unwrap() => Value::Scalar(ScalarValueInner::Bool(true).into()),
+                    id!("id") => Value::Scalar(ScalarValueInner::Int32(1).into()),
+                    id!("name") => Value::Scalar(ScalarValueInner::String("Jim Jones".into()).into()),
+                    id!("active") => Value::Scalar(ScalarValueInner::Bool(true).into()),
                 }).unwrap().into(),
                 StructValue::new(registry.types(), TTypeId::new_anonymous(my_type.clone().into()), btreemap! {
-                    "id".parse().unwrap() => Value::Scalar(ScalarValueInner::Int32(2).into()),
-                    "name".parse().unwrap() => Value::Scalar(ScalarValueInner::String("Jimboni Jonesi".into()).into()),
-                    "active".parse().unwrap() => Value::Scalar(ScalarValueInner::Bool(true).into()),
+                    id!("id") => Value::Scalar(ScalarValueInner::Int32(2).into()),
+                    id!("name") => Value::Scalar(ScalarValueInner::String("Jimboni Jonesi".into()).into()),
+                    id!("active") => Value::Scalar(ScalarValueInner::Bool(true).into()),
                 }).unwrap().into(),
                 StructValue::new(registry.types(), TTypeId::new_anonymous(my_type.clone().into()), btreemap! {
-                    "id".parse().unwrap() => Value::Scalar(ScalarValueInner::Int32(-1).into()),
-                    "name".parse().unwrap() => Value::Scalar(ScalarValueInner::String("El Jones, Jim".into()).into()),
-                    "active".parse().unwrap() => Value::Scalar(ScalarValueInner::Bool(false).into()),
+                    id!("id") => Value::Scalar(ScalarValueInner::Int32(-1).into()),
+                    id!("name") => Value::Scalar(ScalarValueInner::String("El Jones, Jim".into()).into()),
+                    id!("active") => Value::Scalar(ScalarValueInner::Bool(false).into()),
                 }).unwrap().into(),
             ]).unwrap().unwrap();
         }
@@ -213,17 +217,17 @@ mod tests {
         let registry = db.registry_mut();
         
         let my_type = StructType::new(btreemap! {
-            "id".parse().unwrap() => TTypeId::INT32,
-            "name".parse().unwrap() => TTypeId::STRING,
-            "active".parse().unwrap() => TTypeId::BOOL,
+            id!("id") => TTypeId::INT32,
+            id!("name") => TTypeId::STRING,
+            id!("active") => TTypeId::BOOL,
         });
 
         let mut relations = db.relations().write().unwrap();
 
         let registry = db.registry();
         
-        relations.insert("Rel".parse().unwrap(), RwLock::new(MemoryRelation::new(
-            Schema::new(registry.types(), my_type, IdentTree::from_nested_idents(["id".parse().unwrap()])).unwrap()
+        relations.insert(id!("Rel"), RwLock::new(MemoryRelation::new(
+            Schema::new(registry.types(), my_type, IdentTree::from_nested_idents([id!("id").into()])).unwrap()
         )));
 
         let rel = relations.get("Rel").unwrap().read().unwrap();
@@ -235,7 +239,7 @@ mod tests {
         let db = create_db();
 
         db.execute(Query::Data(DataQuery::Range {
-            relation: "Rel".parse().unwrap(),
+            relation: id!("Rel"),
             ident_trees: [].into(),
             range_start: Bound::Unbounded,
             range_end: Bound::Unbounded,

@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, fmt::Debug};
 
-use crate::{idents::{Ident, IdentTree}, registry::{TTypeId, TypeRegistry}};
+use codb_core::{Ident, IdentTree};
+
+use crate::{registry::{TTypeId, TypeRegistry}};
 
 use super::TypeError;
 

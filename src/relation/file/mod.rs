@@ -1,10 +1,11 @@
 use std::{fs::File, io::{self, Write}, ops::RangeBounds, path::{Path, PathBuf}};
 
+use codb_core::IdentTree;
 use either::Either;
 use itertools::Itertools;
 use ron::ser::PrettyConfig;
 
-use crate::{idents::IdentTree, registry::Registry, relation::memory::MemoryRelation, typesystem::{value::Value, TypeError}};
+use crate::{registry::Registry, relation::memory::MemoryRelation, typesystem::{value::Value, TypeError}};
 
 use super::{Relation, RelationRef, Row, Schema};
 
@@ -122,14 +123,14 @@ mod tests {
     fn file_relation() {
         fn new_user(registry: &Registry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
             StructValue::new(registry.types(), user_ttype_id.clone(), btreemap! {
-                "id".parse().unwrap() => ScalarValue::new(registry.types(), TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
-                "active".parse().unwrap() => ScalarValueInner::Bool(active).into(),
+                id!("id") => ScalarValue::new(registry.types(), TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
+                id!("active") => ScalarValueInner::Bool(active).into(),
             }).unwrap().into()
         }
 
         fn new_id(registry: &Registry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
             StructValue::new(registry.types(), user_id_ttype_id.clone(), btreemap! {
-                "id".parse().unwrap() => ScalarValue::new(registry.types(), TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
+                id!("id") => ScalarValue::new(registry.types(), TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
             }).unwrap().into()
         }
 
@@ -139,36 +140,36 @@ mod tests {
 
         // let expression = Expression::ControlFlow(Box::new(ControlFlow::If(IfControlFlow {
         //     condition: Expression::Op(Box::new(Op::Logical(LogicalOp::Lt(
-        //         Expression::NestedIdent("this".parse().unwrap()),
+        //         Expression::NestedIdent(id!("this")),
         //         Expression::Value(Value::Scalar(ScalarValueInner::Int32(500).into())),
         //     )))),
         //     then: Expression::Value(EnumValue::new(
         //         &registry, result_ttype.clone(),
-        //         "Ok".parse().unwrap(),
+        //         id!("Ok"),
         //         Value::UNIT,
         //     ).unwrap().into()),
         //     otherwise: Expression::Value(Value::Composite(CompositeValue::Enum(EnumValue::new(
         //         &registry, result_ttype.clone(),
-        //         "Err".parse().unwrap(),
+        //         id!("Err"),
         //         Value::Scalar(ScalarValueInner::String("lt_500".into()).into()),
         //     ).unwrap()))),
         // })));
 
         let user_struct = StructType::new(btreemap! {
-            "id".parse().unwrap() => TTypeId::INT32,
-            "active".parse().unwrap() => TTypeId::BOOL,
+            id!("id") => TTypeId::INT32,
+            id!("active") => TTypeId::BOOL,
         });
 
         let user_ttype_id = TTypeId::Anonymous(Box::new(user_struct.clone().into()));
 
         let user_id_struct = user_struct.select(
             registry.types(),
-            &IdentTree::from_nested_idents(["id".parse().unwrap()])
+            &IdentTree::from_nested_idents([id!("id").into()])
         ).unwrap();
 
         let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_id_struct.clone().into()));
         
-        let user_pkey = IdentTree::from_nested_idents(["id".parse().unwrap()]);
+        let user_pkey = IdentTree::from_nested_idents([id!("id").into()]);
         let user_schema = Schema::new(registry.types(), user_struct, user_pkey).unwrap();
 
         const USERS_PATH: &str = "target/test_file_relation_users_relation.ron";

@@ -23,21 +23,21 @@ impl Registry {
         let function_unwrap = UserFunction::new(
             &registry,
             vec![
-                FunctionArg::new("value".parse().expect("not an ident"), result_ttype_id),
+                FunctionArg::new(id!("value"), result_ttype_id),
             ],
             TTypeId::UNIT,
             Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
-                param: Expression::NestedIdent("value".parse().expect("not an ident")),
+                param: Expression::NestedIdent(id!("value").into()),
                 ret_type: TTypeId::UNIT,
                 branches: btreemap! {
-                    "Ok".parse().expect("not an ident") => Branch::new(
-                        "_".parse().expect("unreachable"),
+                    id!("Ok") => Branch::new(
+                        id!("_"),
                         Expression::Value(Value::UNIT),
                     ),
-                    "Err".parse().expect("not an ident") => Branch::new(
-                        "_".parse().expect("unreachable"),
+                    id!("Err") => Branch::new(
+                        id!("_"),
                         Expression::FunctionInvocation(FunctionInvocation::new(
-                            "core::panic".parse().expect("not an ident"),
+                            id_path!("core::panic"),
                             [
                                 Expression::Value(
                                     ScalarValue::new(registry.types(), TTypeId::STRING, ScalarValueInner::String("".into())).expect("not a string").into(),
@@ -49,7 +49,7 @@ impl Registry {
             })))
         ).expect("could not create function `unwrap`");
 
-        registry.functions_mut().add("core::unwrap".parse().expect("not an ident"), function_unwrap).expect("failed to add unwrap function");
+        registry.functions_mut().add(id_path!("core::unwrap"), function_unwrap).expect("failed to add unwrap function");
 
         registry
     }

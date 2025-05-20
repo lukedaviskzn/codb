@@ -1,6 +1,8 @@
 use std::{borrow::Cow, fmt::Debug};
 
-use crate::{expr::{EvalError, Expression}, idents::Ident, registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}};
+use codb_core::Ident;
+
+use crate::{expr::{EvalError, Expression}, registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}};
 
 use super::{ttype::StructType, value::{StructValue, Value}, TypeError};
 

@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, fmt::Debug};
 
-use crate::{idents::Ident, typesystem::{ttype::{CompositeType, EnumType, ScalarType, TType}, TypeError}};
+use codb_core::Ident;
+
+use crate::{typesystem::{ttype::{CompositeType, EnumType, ScalarType, TType}, TypeError}};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TypeRegistryError {
@@ -74,9 +76,9 @@ impl TypeRegistry {
             types: btreemap! {},
         };
 
-        registry.add("Result".parse().expect("Result is not an ident"), TType::Composite(CompositeType::Enum(EnumType::new(btreemap! {
-            "Ok".parse().expect("Ok is not an ident") => TTypeId::UNIT,
-            "Err".parse().expect("Err is not an ident") => TTypeId::STRING,
+        registry.add(id!("Result"), TType::Composite(CompositeType::Enum(EnumType::new(btreemap! {
+            id!("Ok") => TTypeId::UNIT,
+            id!("Err") => TTypeId::STRING,
         })))).expect("unreachable");
 
         registry

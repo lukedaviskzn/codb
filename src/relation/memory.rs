@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, io, ops::{Bound, RangeBounds}};
 
-use crate::{idents::IdentTree, registry::{Registry, TTypeId}, typesystem::{value::Value, TypeError}};
+use codb_core::IdentTree;
+
+use crate::{registry::{Registry, TTypeId}, typesystem::{value::Value, TypeError}};
 
 use super::{PKey, Relation, RelationRef, Row, RowSize, Schema};
 
@@ -124,14 +126,14 @@ mod tests {
     fn memory_relation() {
         fn new_user(registry: &TypeRegistry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
             StructValue::new(registry, user_ttype_id.clone(), btreemap! {
-                "id".parse().unwrap() => Value::Scalar(ScalarValueInner::Int32(id).into()),
-                "active".parse().unwrap() => Value::Scalar(ScalarValueInner::Bool(active).into()),
+                id!("id") => Value::Scalar(ScalarValueInner::Int32(id).into()),
+                id!("active") => Value::Scalar(ScalarValueInner::Bool(active).into()),
             }).unwrap().into()
         }
 
         fn new_id(registry: &TypeRegistry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
             StructValue::new(registry, user_id_ttype_id.clone(), btreemap! {
-                "id".parse().unwrap() => Value::Scalar(ScalarValueInner::Int32(id).into()),
+                id!("id") => Value::Scalar(ScalarValueInner::Int32(id).into()),
             }).unwrap().into()
         }
 
@@ -139,20 +141,20 @@ mod tests {
         let type_registry = registry.types();
 
         let user_struct = StructType::new(btreemap! {
-            "id".parse().unwrap() => TTypeId::INT32,
-            "active".parse().unwrap() => TTypeId::BOOL,
+            id!("id") => TTypeId::INT32,
+            id!("active") => TTypeId::BOOL,
         });
 
         let user_ttype_id = TTypeId::Anonymous(Box::new(user_struct.clone().into()));
 
         let user_id_struct = user_struct.select(
             &type_registry,
-            &IdentTree::from_nested_idents(["id".parse().unwrap()])
+            &IdentTree::from_nested_idents([id!("id").into()])
         ).unwrap();
 
         let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_id_struct.clone().into()));
 
-        let user_pkey = IdentTree::from_nested_idents(vec!["id".parse().unwrap()]);
+        let user_pkey = IdentTree::from_nested_idents([id!("id").into()]);
         let user_schema = Schema::new(&type_registry, user_struct, user_pkey).unwrap();
 
         let mut users = MemoryRelation::new(user_schema.clone());

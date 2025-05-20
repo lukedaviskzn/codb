@@ -1,6 +1,8 @@
 use std::{io, ops::RangeBounds};
 
-use crate::{idents::IdentTree, registry::{Registry, TTypeId, TypeRegistry, TypeRegistryError}, typesystem::{ttype::StructType, value::Value, TypeError}};
+use codb_core::IdentTree;
+
+use crate::{registry::{Registry, TTypeId, TypeRegistry, TypeRegistryError}, typesystem::{ttype::StructType, value::Value, TypeError}};
 
 pub mod memory;
 pub mod file;

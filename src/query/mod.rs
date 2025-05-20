@@ -1,6 +1,8 @@
 use std::ops::Bound;
 
-use crate::{expr::Expression, idents::{Ident, IdentTree}, relation::{PKey, Row}, typesystem::value::Value};
+use codb_core::{Ident, IdentTree};
+
+use crate::{expr::Expression, relation::{PKey, Row}, typesystem::value::Value};
 
 pub enum Query {
     Data(DataQuery),

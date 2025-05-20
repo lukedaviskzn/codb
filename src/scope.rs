@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use crate::{idents::{Ident, NestedIdent}, registry::{TTypeId, TypeRegistry}, typesystem::{ttype::{CompositeType, StructType, TType}, value::{StructValue, Value}, TypeError}};
+use codb_core::{Ident, NestedIdent};
+
+use crate::{registry::{TTypeId, TypeRegistry}, typesystem::{ttype::{CompositeType, StructType, TType}, value::{StructValue, Value}, TypeError}};
 
 #[derive(Debug, Clone, Default)]
 pub struct ScopeTypes<'a> {
