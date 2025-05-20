@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt::{Debug, Display}};
 
-use crate::{idents::{Ident, IdentTree}, typesystem::{registry::{TTypeId, TypeRegistry}, ttype::{CompositeType, EnumType, RefinedType, ScalarType, StructType, TType}, RefinementFailedError, TypeError}};
+use crate::{idents::{Ident, IdentTree}, registry::{TTypeId, TypeRegistry}, typesystem::{ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, TypeError}};
 
 use super::{CompositeLiteral, EnumLiteral, Literal, LiteralType, ScalarLiteral, ScalarLiteralInner, StructLiteral};
 
@@ -148,7 +148,7 @@ pub struct StructValue {
 
 impl StructValue {
     pub fn new(registry: &TypeRegistry, ttype_id: TTypeId, fields: BTreeMap<Ident, Value>) -> Result<StructValue, TypeError> {
-        let (ttype, refinement_conditions) = registry.get_by_id(&ttype_id)?.unrefined(registry)?;
+        let ttype = registry.get_by_id(&ttype_id)?;
 
         let TType::Composite(CompositeType::Struct(ttype)) = ttype else {
             return Err(TypeError::TypeInvalid {
@@ -187,37 +187,6 @@ impl StructValue {
             ttype_id,
             fields,
         };
-
-        // check refinement conditions
-
-        let scope_ttype = TTypeId::Anonymous(Box::new(StructType::new(btreemap! {
-            "this".parse().expect("unreachable") => value.ttype_id(),
-        }).into()));
-
-        for condition in refinement_conditions {
-            let expr = condition.eval(registry, &[&StructValue::new(registry, scope_ttype.clone(), btreemap! {
-                "this".parse().expect("unreachable") => value.clone().into(),
-            }).expect("unreachable")]).map_err(|err| RefinementFailedError::Expr(Box::new(err)))?;
-
-            let result_ttype = registry.get_id_by_name(RefinedType::RESULT_TYPE_NAME)?;
-
-            if result_ttype != expr.ttype_id() {
-                return Err(TypeError::TypeInvalid {
-                    expected: registry.get_by_id(&result_ttype)?,
-                    got: registry.get_by_id(&expr.ttype_id())?,
-                })
-            }
-
-            if expr != RefinedType::result_ok(registry) {
-                let Value::Composite(CompositeValue::Enum(expr)) = expr else { unreachable!() };
-                let Value::Scalar(ScalarValue {
-                    inner: ScalarValueInner::String(string),
-                    ..
-                }) = expr.into_value() else { unreachable!() };
-
-                return Err(TypeError::RefinementFailed(RefinementFailedError::Refinement(string)))
-            }
-        }
 
         Ok(value)
     }
@@ -406,7 +375,7 @@ pub struct ScalarValue {
 
 impl ScalarValue {
     pub fn new(registry: &TypeRegistry, ttype_id: TTypeId, inner: ScalarValueInner) -> Result<ScalarValue, TypeError> {
-        let (ttype, refinement_conditions) = registry.get_by_id(&ttype_id)?.unrefined(registry)?;
+        let ttype = registry.get_by_id(&ttype_id)?;
 
         let TType::Scalar(ttype) = ttype else {
             return Err(TypeError::TypeInvalid {
@@ -455,37 +424,6 @@ impl ScalarValue {
             ttype_id,
             inner,
         };
-
-        // check refinement conditions
-
-        let scope_ttype = TTypeId::Anonymous(Box::new(StructType::new(btreemap! {
-            "this".parse().expect("unreachable") => value.ttype_id(),
-        }).into()));
-
-        for condition in refinement_conditions {
-            let expr = condition.eval(registry, &[&StructValue::new(registry, scope_ttype.clone(), btreemap! {
-                "this".parse().expect("unreachable") => value.clone().into(),
-            }).expect("unreachable")]).map_err(|err| RefinementFailedError::Expr(Box::new(err)))?;
-
-            let result_ttype = registry.get_id_by_name(RefinedType::RESULT_TYPE_NAME)?;
-
-            if result_ttype != expr.ttype_id() {
-                return Err(TypeError::TypeInvalid {
-                    expected: registry.get_by_id(&result_ttype)?,
-                    got: registry.get_by_id(&expr.ttype_id())?,
-                })
-            }
-
-            if expr != RefinedType::result_ok(registry) {
-                let Value::Composite(CompositeValue::Enum(expr)) = expr else { unreachable!() };
-                let Value::Scalar(ScalarValue {
-                    inner: ScalarValueInner::String(string),
-                    ..
-                }) = expr.into_value() else { unreachable!() };
-
-                return Err(TypeError::RefinementFailed(RefinementFailedError::Refinement(string)))
-            }
-        }
 
         Ok(value)
     }

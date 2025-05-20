@@ -1,6 +1,6 @@
 use std::{io, ops::RangeBounds};
 
-use crate::{idents::IdentTree, typesystem::{registry::{TTypeId, TypeRegistry, TypeRegistryError}, ttype::StructType, value::Value, TypeError}};
+use crate::{idents::IdentTree, registry::{Registry, TTypeId, TypeRegistry, TypeRegistryError}, typesystem::{ttype::StructType, value::Value, TypeError}};
 
 pub mod memory;
 pub mod file;
@@ -11,10 +11,10 @@ pub type RowSize = u64;
 
 pub trait RelationRef {
     fn schema(&self) -> &Schema;
-    fn range(&self, registry: &TypeRegistry, ident_trees: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError>;
+    fn range(&self, registry: &Registry, ident_trees: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError>;
     
     #[cfg(test)]
-    fn eq(&self, registry: &TypeRegistry, other: &impl RelationRef) -> bool {
+    fn eq(&self, registry: &Registry, other: &impl RelationRef) -> bool {
         use itertools::Itertools;
 
         if self.schema() != other.schema() {
@@ -37,7 +37,7 @@ pub trait RelationRef {
     }
     
     #[cfg(test)]
-    fn draw(&self, registry: &TypeRegistry) -> String {
+    fn draw(&self, registry: &Registry) -> String {
         let mut out_string = String::new();
 
         out_string += &format!("{:?}\n", self.schema().ttype());
@@ -54,9 +54,9 @@ pub trait RelationRef {
 }
 
 pub trait Relation: RelationRef {
-    fn insert(&mut self, registry: &TypeRegistry, new_row: Row) -> Result<io::Result<bool>, TypeError>;
+    fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<io::Result<bool>, TypeError>;
     
-    fn extend(&mut self, registry: &TypeRegistry, new_rows: impl IntoIterator<Item = Row>) -> Result<io::Result<RowSize>, TypeError> {
+    fn extend(&mut self, registry: &Registry, new_rows: impl IntoIterator<Item = Row>) -> Result<io::Result<RowSize>, TypeError> {
         let mut count = 0;
         for new_row in new_rows {
             if let Err(err) = self.insert(registry, new_row)? {
@@ -67,7 +67,7 @@ pub trait Relation: RelationRef {
         Ok(Ok(count))
     }
     
-    fn remove(&mut self, registry: &TypeRegistry, pkey: &PKey) -> Result<io::Result<Option<Row>>, TypeError>;
+    fn remove(&mut self, registry: &Registry, pkey: &PKey) -> Result<io::Result<Option<Row>>, TypeError>;
     fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> io::Result<RowSize>;
 }
 

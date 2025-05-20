@@ -1,11 +1,11 @@
-use std::fmt::Debug;
+use std::{collections::BTreeMap, fmt::Debug};
 
-use super::ttype::{CompositeType, EnumType, RefinedType, ScalarType, TType};
+use crate::{idents::Ident, typesystem::{ttype::{CompositeType, EnumType, ScalarType, TType}, TypeError}};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TypeRegistryError {
     #[error("type with name {0:?} already exists")]
-    NameTaken(String),
+    NameTaken(Ident),
     #[error("type with id {0:?} could not be found")]
     TypeIdNotFound(u64),
     #[error("type {0:?} could not be found")]
@@ -29,6 +29,7 @@ impl TTypeId {
 }
 
 impl TTypeId {
+    pub const NEVER: TTypeId = TTypeId::Scalar(ScalarType::Never);
     pub const UNIT: TTypeId = TTypeId::Scalar(ScalarType::Unit);
     pub const BOOL: TTypeId = TTypeId::Scalar(ScalarType::Bool);
     pub const INT32: TTypeId = TTypeId::Scalar(ScalarType::Int32);
@@ -63,32 +64,32 @@ impl From<ScalarType> for TTypeId {
 
 pub struct TypeRegistry {
     last_id: u64,
-    entries: Vec<TypeRegistryEntry>,
+    types: BTreeMap<u64, TypeRegistryEntry>,
 }
 
 impl TypeRegistry {
     pub fn new() -> TypeRegistry {
         let mut registry = TypeRegistry {
             last_id: 0,
-            entries: vec![],
+            types: btreemap! {},
         };
 
-        registry.add(RefinedType::RESULT_TYPE_NAME, TType::Composite(CompositeType::Enum(EnumType::new(btreemap! {
-            RefinedType::RESULT_TYPE_OK.parse().expect("unreachable") => TTypeId::UNIT,
-            RefinedType::RESULT_TYPE_ERR.parse().expect("unreachable") => TTypeId::STRING,
+        registry.add("Result".parse().expect("Result is not an ident"), TType::Composite(CompositeType::Enum(EnumType::new(btreemap! {
+            "Ok".parse().expect("Ok is not an ident") => TTypeId::UNIT,
+            "Err".parse().expect("Err is not an ident") => TTypeId::STRING,
         })))).expect("unreachable");
 
         registry
     }
 
-    pub fn types(&self) -> &[TypeRegistryEntry] {
-        &self.entries
+    pub fn types(&self) -> impl Iterator<Item = (u64, &TypeRegistryEntry)> {
+        self.types.iter().map(|(id, entry)| (*id, entry))
     }
 
     pub fn get_by_id(&self, ttype_id: &TTypeId) -> Result<TType, TypeRegistryError> {
         match ttype_id {
             TTypeId::Scalar(ttype) => Ok(TType::Scalar(*ttype)),
-            TTypeId::Id(id) => if let Some(entry) = self.entries.iter().find(|entry| entry.id == *id) {
+            TTypeId::Id(id) =>  if let Some(entry) = self.types.get(id) {
                 Ok(entry.ttype.clone())
             } else {
                 Err(TypeRegistryError::TypeIdNotFound(*id))
@@ -102,8 +103,8 @@ impl TypeRegistry {
             return Ok(TTypeId::Scalar(*ttype));
         }
         
-        self.entries.iter().find(|e| e.name == name)
-            .map(|e| TTypeId::Id(e.id))
+        self.types.iter().find(|(_, entry)| entry.name == *name)
+            .map(|(id, _)| TTypeId::Id(*id))
             .ok_or_else(|| TypeRegistryError::TypeNotFound(name.into()))
     }
 
@@ -111,16 +112,16 @@ impl TypeRegistry {
         if let Some(ttype) = ScalarType::ALL.iter().find(|t| t.name() == name) {
             return Ok(TType::Scalar(*ttype));
         }
-        self.entries.iter().find(|e| e.name == name)
-            .map(|e| e.ttype.clone())
+        self.types.iter().find(|(_, entry)| entry.name == *name)
+            .map(|(_, entry)| entry.ttype.clone())
             .ok_or_else(|| TypeRegistryError::TypeNotFound(name.into()))
     }
 
     pub fn get_name(&self, ttype_id: &TTypeId) -> Result<String, TypeRegistryError> {
         match ttype_id {
             TTypeId::Scalar(scalar_type) => Ok(scalar_type.name().into()),
-            TTypeId::Id(id) => if let Some(entry) = self.entries.iter().find(|e| e.id == *id) {
-                Ok(entry.name.clone())
+            TTypeId::Id(id) => if let Some(entry) = self.types.get(id) {
+                Ok(entry.name.clone().into())
             } else {
                 Err(TypeRegistryError::TypeIdNotFound(*id))
             },
@@ -128,30 +129,43 @@ impl TypeRegistry {
         }
     }
 
-    pub fn add(&mut self, name: impl Into<String>, ttype: TType) -> Result<TTypeId, TypeRegistryError> {
-        let mut names = self.entries.iter().map(|e| e.name.as_str())
+    pub fn add(&mut self, name: Ident, ttype: TType) -> Result<TTypeId, TypeRegistryError> {
+        let mut names = self.types.iter().map(|(_, entry)| &*entry.name)
             .chain(ScalarType::ALL.iter().map(|t| t.name()));
 
-        let name = name.into();
-        
-        if names.any(|n| n == name) {
+        if names.any(|n| name == *n) {
             return Err(TypeRegistryError::NameTaken(name));
         }
 
         self.last_id += 1;
 
-        self.entries.push(TypeRegistryEntry {
-            id: self.last_id,
+        let None = self.types.insert(self.last_id, TypeRegistryEntry {
             name,
             ttype,
-        });
+        }) else {
+            unreachable!("last_id is strictly increasing");
+        };
 
         Ok(self.last_id.into())
+    }
+
+    pub fn types_compatible(from: &TTypeId, to: &TTypeId) -> bool {
+        from == to || *from == TTypeId::NEVER
+    }
+
+    pub fn expect_type(&self, expected: &TTypeId, got: &TTypeId) -> Result<(), TypeError> {
+        if Self::types_compatible(got, expected) {
+            Ok(())
+        } else {
+            Err(TypeError::TypeInvalid {
+                expected: self.get_by_id(expected)?,
+                got: self.get_by_id(got)?,
+            })
+        }
     }
 }
 
 pub struct TypeRegistryEntry {
-    id: u64,
-    name: String,
+    name: Ident,
     ttype: TType,
 }

@@ -1,6 +1,14 @@
-use std::{collections::BTreeMap, fmt::{Debug, Display}};
+use std::{borrow::Cow, collections::{BTreeMap, HashSet}, fmt::{Debug, Display}};
 
-use crate::{idents::{Ident, NestedIdent}, typesystem::{registry::{TTypeId, TypeRegistry}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, LiteralType, ScalarValue, ScalarValueInner, StructLiteral, StructValue, Value}, TypeError}};
+use crate::{idents::{Ident, IdentPath, NestedIdent}, registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}, typesystem::{function::{FunctionEntry, InterpreterFunctionAction}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, LiteralType, ScalarValue, ScalarValueInner, StructLiteral, StructValue, Value}, TypeError}};
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EvalError {
+    #[error("{0:?}")]
+    TypeError(#[from] TypeError),
+    #[error("evaluation panicked{}{}", if .0.is_empty() { "!" } else { ": " }, .0)]
+    Panic(String),
+}
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Expression {
@@ -8,79 +16,42 @@ pub enum Expression {
     Value(Value),
     Op(Box<Op>),
     ControlFlow(Box<ControlFlow>),
+    FunctionInvocation(FunctionInvocation),
 }
 
 impl Debug for Expression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NestedIdent(nested_idents) => Display::fmt(&nested_idents.join("."), f),
+            Self::NestedIdent(nested_ident) => Display::fmt(&nested_ident.join("."), f),
             Self::Value(value) => Debug::fmt(value, f),
             Self::Op(op) => Debug::fmt(op, f),
-            Self::ControlFlow(cf) => Debug::fmt(cf, f)
+            Self::ControlFlow(cf) => Debug::fmt(cf, f),
+            Self::FunctionInvocation(function) => Debug::fmt(function, f),
         }
     }
 }
 
 impl Expression {
-    pub fn eval_types(&self, registry: &TypeRegistry, scopes: &[&StructType]) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
-            Expression::NestedIdent(nested_idents) => {
-                let mut nested_idents = nested_idents.to_vec();
-                let first = nested_idents.remove(0);
-
-                let mut ttype = None;
-
-                for scope in scopes {
-                    if let Some(ttype_id) = scope.fields().get(&first) {
-                        ttype = Some(registry.get_by_id(ttype_id)?);
-                        break;
-                    }
-                }
-
-                let Some(mut ttype) = ttype else {
-                    return Err(TypeError::MissingField(first));
-                };
-
-                for ident in nested_idents {
-                    ttype = ttype.dot(registry, &ident)?;
-                }
-                
-                Ok(ttype)
+            Expression::NestedIdent(nested_ident) => {
+                let ttype_id = scopes.get_nested(registry.types(), nested_ident)?;
+                Ok(ttype_id)
             },
-            Expression::Value(value) => Ok(registry.get_by_id(&value.ttype_id())?),
+            Expression::Value(value) => Ok(value.ttype_id()),
             Expression::Op(op) => op.eval_types(registry, scopes),
             Expression::ControlFlow(control_flow) => control_flow.eval_types(registry, scopes),
+            Expression::FunctionInvocation(function) => function.eval_types(registry, scopes),
         }
     }
 
-    pub fn eval(&self, registry: &TypeRegistry, scopes: &[&StructValue]) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
-            Expression::NestedIdent(nested_idents) => {
-                let mut nested_idents = nested_idents.to_vec();
-                let first = nested_idents.remove(0);
-
-                let mut value = None;
-
-                for scope in scopes {
-                    if let Some(val) = scope.fields().get(&first) {
-                        value = Some(val.clone());
-                        break;
-                    }
-                }
-
-                let Some(mut value) = value else {
-                    return Err(ExprError::TTypeError(TypeError::MissingField(first)));
-                };
-
-                for ident in nested_idents {
-                    value = value.dot(&ident)?;
-                }
-                
-                Ok(value)
-            },
+            Expression::NestedIdent(nested_ident) => Ok(scopes.get_nested(nested_ident)?),
             Expression::Value(value) => Ok(value.clone()),
-            Expression::Op(op) => op.eval(registry, scopes),
-            Expression::ControlFlow(cf) => cf.eval(registry, scopes),
+            Expression::Op(op) => Ok(op.eval(registry, scopes)?),
+            Expression::ControlFlow(cf) => Ok(cf.eval(registry, scopes)?),
+            Expression::FunctionInvocation(function) => function.eval(registry, scopes),
         }
     }
 }
@@ -101,14 +72,14 @@ impl Debug for Op {
 }
 
 impl Op {
-    pub fn eval_types(&self, registry: &TypeRegistry, scopes: &[&StructType]) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
             Op::Logical(op) => op.eval_types(registry, scopes),
             Op::Arithmetic(op) => op.eval_types(registry, scopes),
         }
     }
     
-    pub fn eval(&self, registry: &TypeRegistry, scopes: &[&StructValue]) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
             Op::Logical(op) => op.eval(registry, scopes),
             Op::Arithmetic(op) => op.eval(registry, scopes),
@@ -144,78 +115,56 @@ impl Debug for LogicalOp {
 }
 
 impl LogicalOp {
-    pub fn eval_types(&self, registry: &TypeRegistry, scopes: &[&StructType]) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
             LogicalOp::And(left, right) |
             LogicalOp::Or(left, right) => {
-                let (left_type, _) = left.eval_types(registry, scopes)?.unrefined(registry)?;
-                if TType::BOOL != left_type {
-                    return Err(TypeError::TypeInvalid { expected: TType::BOOL, got: left_type });
-                }
-                
-                let (right_type, _) = right.eval_types(registry, scopes)?.unrefined(registry)?;
-                if TType::BOOL != right_type {
-                    return Err(TypeError::TypeInvalid { expected: TType::BOOL, got: right_type });
-                }
+                let left_type_id = left.eval_types(registry, scopes)?;
+                let right_type_id = right.eval_types(registry, scopes)?;
 
-                Ok(TType::BOOL)
+                registry.types().expect_type(&TTypeId::BOOL, &left_type_id)?;
+                registry.types().expect_type(&TTypeId::BOOL, &right_type_id)?;
+                
+                Ok(TTypeId::BOOL)
             },
             LogicalOp::Lt(left, right) |
             LogicalOp::Gt(left, right) |
             LogicalOp::Lte(left, right) |
             LogicalOp::Gte(left, right) => {
-                let (left_type, _) = left.eval_types(registry, scopes)?.unrefined(registry)?;
-                if TType::INT32 != left_type {
-                    return Err(TypeError::TypeInvalid { expected: TType::INT32, got: left_type });
-                }
-                
-                let (right_type, _) = right.eval_types(registry, scopes)?.unrefined(registry)?;
-                if TType::INT32 != right_type {
-                    return Err(TypeError::TypeInvalid { expected: TType::INT32, got: right_type });
-                }
+                let left_type_id = left.eval_types(registry, scopes)?;
+                let right_type_id = right.eval_types(registry, scopes)?;
 
-                Ok(TType::BOOL)
+                registry.types().expect_type(&TTypeId::BOOL, &left_type_id)?;
+                registry.types().expect_type(&TTypeId::BOOL, &right_type_id)?;
+
+                Ok(TTypeId::BOOL)
             },
             LogicalOp::Eq(left, right) => {
-                let (left_type, _) = left.eval_types(registry, scopes)?.unrefined(registry)?;
-                let (right_type, _) = right.eval_types(registry, scopes)?.unrefined(registry)?;
+                let left_type_id = left.eval_types(registry, scopes)?;
+                let right_type_id = right.eval_types(registry, scopes)?;
 
-                if left_type != right_type {
-                    return Err(TypeError::TypeInvalid { expected: left_type, got: right_type });
-                }
+                registry.types().expect_type(&left_type_id, &right_type_id)?;
 
-                Ok(TType::BOOL)
+                Ok(TTypeId::BOOL)
             },
             LogicalOp::Not(expr) => {
-                let (expr_ttype, _) = expr.eval_types(registry, scopes)?.unrefined(registry)?;
-                if TType::BOOL != expr_ttype {
-                    return Err(TypeError::TypeInvalid { expected: TType::BOOL, got: expr_ttype });
-                }
+                let expr_type_id = expr.eval_types(registry, scopes)?;
+
+                registry.types().expect_type(&TTypeId::BOOL, &expr_type_id)?;
                 
-                Ok(TType::BOOL)
+                Ok(TTypeId::BOOL)
             },
         }
     }
 
-    pub fn eval(&self, registry: &TypeRegistry, scopes: &[&StructValue]) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
             LogicalOp::And(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
-                
-                if left.ttype_id() == TTypeId::BOOL {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::BOOL,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::BOOL {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::BOOL,
-                        got: right,
-                    }))
-                }
+
+                registry.types().expect_type(&TTypeId::BOOL, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::BOOL, &right.ttype_id())?;
                 
                 Ok(ScalarValueInner::Bool(left == Value::TRUE && right == Value::TRUE).into())
             },
@@ -223,44 +172,23 @@ impl LogicalOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                if left.ttype_id() == TTypeId::BOOL {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::BOOL,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::BOOL {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::BOOL,
-                        got: right,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::BOOL, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::BOOL, &right.ttype_id())?;
                 
                 Ok(ScalarValueInner::Bool(left == Value::TRUE || right == Value::TRUE).into())
             },
             LogicalOp::Not(expr) => {
                 let value = expr.eval(registry, scopes)?;
                 
-                if value.ttype_id() == TTypeId::BOOL {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::BOOL,
-                        got: value,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::BOOL, &value.ttype_id())?;
                 
                 Ok(ScalarValueInner::Bool(value == Value::FALSE).into())
             },
             LogicalOp::Eq(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
-
-                if left.ttype_id() != right.ttype_id() {
-                    return Err(TypeError::TypeInvalid {
-                        expected: registry.get_by_id(&left.ttype_id()).map_err(|err| TypeError::from(err))?,
-                        got: registry.get_by_id(&right.ttype_id()).map_err(|err| TypeError::from(err))?,
-                    }.into());
-                }
+                
+                registry.types().expect_type(&left.ttype_id(), &right.ttype_id())?;
                 
                 Ok(ScalarValueInner::Bool(left == right).into())
             },
@@ -268,19 +196,8 @@ impl LogicalOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                if left.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: right,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
                 
                 Ok(ScalarValueInner::Bool(left < right).into())
             },
@@ -288,19 +205,8 @@ impl LogicalOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                if left.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: right,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
                 
                 Ok(ScalarValueInner::Bool(left > right).into())
             },
@@ -308,19 +214,8 @@ impl LogicalOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                if left.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: right,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
                 
                 Ok(ScalarValueInner::Bool(left <= right).into())
             },
@@ -328,19 +223,8 @@ impl LogicalOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                if left.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: right,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
                 
                 Ok(ScalarValueInner::Bool(left >= right).into())
             },
@@ -368,46 +252,31 @@ impl Debug for ArithmeticOp {
 }
 
 impl ArithmeticOp {
-    pub fn eval_types(&self, registry: &TypeRegistry, scopes: &[&StructType]) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
             ArithmeticOp::Add(left, right) |
             ArithmeticOp::Sub(left, right) |
             ArithmeticOp::Mul(left, right) |
             ArithmeticOp::Div(left, right) => {
-                let (left_type, _) = left.eval_types(registry, scopes)?.unrefined(registry)?;
-                let (right_type, _) = right.eval_types(registry, scopes)?.unrefined(registry)?;
+                let left_type_id = left.eval_types(registry, scopes)?;
+                let right_type_id = right.eval_types(registry, scopes)?;
 
-                if TType::INT32 != left_type {
-                    return Err(TypeError::TypeInvalid { expected: TType::INT32, got: left_type });
-                }
-                if TType::INT32 != right_type {
-                    return Err(TypeError::TypeInvalid { expected: TType::INT32, got: right_type });
-                }
+                registry.types().expect_type(&TTypeId::INT32, &left_type_id)?;
+                registry.types().expect_type(&TTypeId::INT32, &right_type_id)?;
 
-                Ok(TType::INT32)
+                Ok(TTypeId::INT32)
             },
         }
     }
 
-    pub fn eval(&self, registry: &TypeRegistry, scopes: &[&StructValue]) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
             ArithmeticOp::Add(left, right) => {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                if left.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: right,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
 
                 let Value::Scalar(left) = left else { unreachable!() };
                 let Value::Scalar(right) = right else { unreachable!() };
@@ -421,19 +290,8 @@ impl ArithmeticOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                if left.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: right,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
 
                 let Value::Scalar(left) = left else { unreachable!() };
                 let Value::Scalar(right) = right else { unreachable!() };
@@ -447,19 +305,8 @@ impl ArithmeticOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                if left.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: right,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
 
                 let Value::Scalar(left) = left else { unreachable!() };
                 let Value::Scalar(right) = right else { unreachable!() };
@@ -473,19 +320,8 @@ impl ArithmeticOp {
                 let left = left.eval(registry, scopes)?;
                 let right = right.eval(registry, scopes)?;
                 
-                if left.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: left,
-                    }))
-                }
-                
-                if right.ttype_id() == TTypeId::INT32 {
-                    return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                        expected: TType::INT32,
-                        got: right,
-                    }))
-                }
+                registry.types().expect_type(&TTypeId::INT32, &left.ttype_id())?;
+                registry.types().expect_type(&TTypeId::INT32, &right.ttype_id())?;
 
                 let Value::Scalar(left) = left else { unreachable!() };
                 let Value::Scalar(right) = right else { unreachable!() };
@@ -497,12 +333,6 @@ impl ArithmeticOp {
             },
         }
     }
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ExprError {
-    #[error("{0}")]
-    TTypeError(#[from] TypeError),
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
@@ -521,14 +351,14 @@ impl Debug for ControlFlow {
 }
 
 impl ControlFlow {
-    pub fn eval_types(&self, registry: &TypeRegistry, scopes: &[&StructType]) -> Result<TType, TypeError> {
+    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
             ControlFlow::If(cf) => cf.eval_types(registry, scopes),
             ControlFlow::Match(cf) => cf.eval_types(registry, scopes),
         }
     }
 
-    pub fn eval(&self, registry: &TypeRegistry, scopes: &[&StructValue]) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
             ControlFlow::If(cf) => cf.eval(registry, scopes),
             ControlFlow::Match(cf) => cf.eval(registry, scopes),
@@ -539,6 +369,7 @@ impl ControlFlow {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct IfControlFlow {
     pub condition: Expression,
+    pub ret_type: TTypeId,
     pub then: Expression,
     pub otherwise: Expression,
 }
@@ -550,32 +381,24 @@ impl Debug for IfControlFlow {
 }
 
 impl IfControlFlow {
-    pub fn eval_types(&self, registry: &TypeRegistry, scopes: &[&StructType]) -> Result<TType, TypeError> {
-        let (cond_type, _) = self.condition.eval_types(registry, scopes)?.unrefined(registry)?;
+    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+        let cond_type_id = self.condition.eval_types(registry, scopes)?;
 
-        if TType::BOOL != cond_type {
-            return Err(TypeError::TypeInvalid { expected: TType::BOOL, got: cond_type });
-        }
+        registry.types().expect_type(&TTypeId::BOOL, &cond_type_id)?;
         
-        let then_type = self.then.eval_types(registry, scopes)?;
-        let otherwise_type = self.then.eval_types(registry, scopes)?;
+        let then_type_id = self.then.eval_types(registry, scopes)?;
+        let otherwise_type_id = self.then.eval_types(registry, scopes)?;
 
-        if then_type != otherwise_type {
-            return Err(TypeError::TypeInvalid { expected: then_type, got: otherwise_type });
-        }
+        registry.types().expect_type(&self.ret_type, &then_type_id)?;
+        registry.types().expect_type(&self.ret_type, &otherwise_type_id)?;
 
-        Ok(then_type)
+        Ok(then_type_id)
     }
 
-    pub fn eval(&self, registry: &TypeRegistry, scopes: &[&StructValue]) -> Result<Value, ExprError> {
+    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
         let cond_value = self.condition.eval(registry, scopes)?;
                 
-        if cond_value.ttype_id() == TTypeId::BOOL {
-            return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                expected: TType::BOOL,
-                got: cond_value,
-            }))
-        }
+        registry.types().expect_type(&TTypeId::BOOL, &cond_value.ttype_id())?;
 
         if cond_value == Value::TRUE {
             self.then.eval(registry, scopes)
@@ -588,6 +411,7 @@ impl IfControlFlow {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MatchControlFlow {
     pub param: Expression,
+    pub ret_type: TTypeId,
     pub branches: BTreeMap<Ident, Branch>,
 }
 
@@ -607,30 +431,21 @@ impl Debug for MatchControlFlow {
 }
 
 impl MatchControlFlow {
-    fn extract_enum(registry: &TypeRegistry, mut ttype: TType) -> Result<EnumType, TypeError> {
-        let example_enum = TType::Composite(CompositeType::Enum(EnumType::new(btreemap! {})));
+    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+        let param_type_id = self.param.eval_types(registry, scopes)?;
 
-        loop {
-            match ttype {
-                TType::Composite(CompositeType::Enum(_)) => break,
-                // TType::Refined(refined_type) => ttype = registry.get_by_id(refined_type.ttype_id())?,
-                ttype => return Err(TypeError::TypeInvalid {
-                    expected: example_enum,
-                    got: ttype,
-                }),
-            };
+        if param_type_id == TTypeId::NEVER {
+            return Ok(TTypeId::NEVER);
         }
+        
+        let param_type = registry.types().get_by_id(&param_type_id)?;
 
-        let TType::Composite(CompositeType::Enum(ttype)) = ttype else {
-            unreachable!();
+        let TType::Composite(CompositeType::Enum(param_type)) = param_type else {
+            return Err(TypeError::TypeInvalid {
+                expected: EnumType::new(btreemap! {}).into(),
+                got: param_type,
+            });
         };
-
-        Ok(ttype)
-    }
-    
-    pub fn eval_types(&self, registry: &TypeRegistry, scopes: &[&StructType]) -> Result<TType, TypeError> {
-        let param_type = self.param.eval_types(registry, scopes)?;
-        let param_type = Self::extract_enum(registry, param_type)?;
 
         for tag in param_type.tags().keys() {
             if self.branches.keys().all(|pattern| pattern != tag) {
@@ -645,17 +460,15 @@ impl MatchControlFlow {
         }
 
         let Some((first_pattern_tag, first_branch)) = self.branches.first_key_value() else {
-            return Ok(TType::Scalar(ScalarType::Never));
+            return Ok(ScalarType::Never.into());
         };
         
         let new_scope = StructType::new(btreemap! {
             first_branch.ident.clone() => param_type.tags()[first_pattern_tag].clone(),
         });
 
-        let mut new_scopes = scopes.to_vec();
-        new_scopes.push(&new_scope);
-
-        let first_branch_type = first_branch.expression.eval_types(registry, &new_scopes)?;
+        let mut new_scopes = scopes.clone();
+        new_scopes.push(Cow::Owned(new_scope));
 
         // all branches return same type
         for (tag, branch) in &self.branches {
@@ -663,61 +476,53 @@ impl MatchControlFlow {
                 branch.ident.clone() => param_type.tags()[tag].clone(),
             });
 
-            let mut new_scopes = scopes.to_vec();
-            new_scopes.push(&new_scope);
+            let mut new_scopes = scopes.clone();
+            new_scopes.push(Cow::Owned(new_scope));
 
-            let branch_type = branch.expression.eval_types(registry, &new_scopes)?;
-            if branch_type != first_branch_type {
-                return Err(TypeError::TypeInvalid {
-                    expected: first_branch_type,
-                    got: branch_type,
-                });
-            }
+            let branch_type_id = branch.expression.eval_types(registry, &new_scopes)?;
+
+            registry.types().expect_type(&self.ret_type, &branch_type_id)?;
         }
         
-        Ok(first_branch_type)
+        Ok(self.ret_type.clone())
     }
 
-    pub fn eval(&self, registry: &TypeRegistry, scopes: &[&StructValue]) -> Result<Value, ExprError> {
-        let mut scope_types = vec![];
-
-        for scope in scopes {
-            let ttype = registry.get_by_id(&scope.ttype_id()).map_err(|err| TypeError::from(err))?;
-            let TType::Composite(CompositeType::Struct(ttype)) = ttype else {
-                unreachable!();
-            };
-            scope_types.push(ttype);
-        }
-
-        let scope_types = scope_types.iter().collect::<Vec<_>>();
+    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
+        let scope_types = scopes.types(registry.types())?;
         
         let param_type = self.param.eval_types(registry, &scope_types)?;
-        let param_type = Self::extract_enum(registry, param_type)?;
+        let param_type = registry.types().get_by_id(&param_type).map_err(|err| TypeError::from(err))?;
+        let TType::Composite(CompositeType::Enum(param_type)) = param_type else {
+            return Err(TypeError::TypeInvalid {
+                expected: EnumType::new(btreemap! {}).into(),
+                got: param_type,
+            }.into());
+        };
 
         let param_value = self.param.eval(registry, scopes)?;
 
         let param_value = match param_value {
             Value::Composite(CompositeValue::Enum(param_value)) => param_value,
-            param_value => return Err(ExprError::TTypeError(TypeError::ValueTypeInvalid {
-                expected: TType::Composite(CompositeType::Enum(EnumType::new(btreemap! {}))),
+            param_value => return Err(TypeError::ValueTypeInvalid {
+                expected: EnumType::new(btreemap! {}).into(),
                 got: param_value,
-            })),
+            }.into()),
         };
 
         let Some(branch) = self.branches.get(param_value.tag()) else {
-            return Err(ExprError::TTypeError(TypeError::UnknownTag(param_value.tag().clone())));
+            return Err(TypeError::UnknownTag(param_value.tag().clone()).into());
         };
 
         let scope_type = TTypeId::Anonymous(Box::new(StructType::new(btreemap! {
             branch.ident.clone() => param_type.tags()[param_value.tag()].clone(),
         }).into()));
         
-        let new_scope = StructValue::new(registry, scope_type, btreemap! {
+        let new_scope = StructValue::new(registry.types(), scope_type, btreemap! {
             branch.ident.clone() => param_value.into_value(),
         })?;
 
-        let mut new_scopes = scopes.to_vec();
-        new_scopes.push(&new_scope);
+        let mut new_scopes = scopes.clone();
+        new_scopes.push(Cow::Owned(new_scope));
         
         branch.expression.eval(registry, &new_scopes)
     }
@@ -729,50 +534,144 @@ pub struct Branch {
     expression: Expression,
 }
 
+impl Branch {
+    pub fn new(ident: Ident, expression: Expression) -> Branch {
+        Branch {
+            ident,
+            expression,
+        }
+    }
+}
+
 impl Debug for Branch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({:?}) => {:?}", self.ident, self.expression)
     }
 }
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct FunctionInvocation {
+    function: IdentPath,
+    args: Box<[Expression]>,
+}
+
+impl FunctionInvocation {
+    pub fn new(function: IdentPath, args: impl Into<Box<[Expression]>>) -> FunctionInvocation {
+        FunctionInvocation {
+            function,
+            args: args.into(),
+        }
+    }
+
+    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+        let function = registry.functions().get(&self.function)?;
+
+        let ret_type = function.result_type();
+
+        if function.args().len() != self.args.len() {
+            return Err(TypeError::FunctionArgLen {
+                expected: function.args().len(),
+                got: self.args.len(),
+            });
+        }
+
+        let mut arg_names = HashSet::new();
+
+        for (arg, expression) in function.args().iter().zip(self.args.iter()) {
+            let expression_type_id = expression.eval_types(registry, scopes)?;
+
+            registry.types().expect_type(&expression_type_id, arg.ttype_id())?;
+            
+            if !arg_names.insert(arg.name()) {
+                return Err(TypeError::FunctionDuplicateArg {
+                    arg: arg.name().clone(),
+                })
+            }
+        }
+
+        Ok(ret_type.clone())
+    }
+
+    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
+        let function = registry.functions().get(&self.function).map_err(|err| TypeError::from(err))?;
+        let mut args = Vec::new();
+
+        for arg in &self.args {
+            args.push(arg.eval(registry, scopes)?);
+        }
+
+        match function {
+            FunctionEntry::UserFunction(function) => Ok(function.invoke(registry, args)?),
+            FunctionEntry::InterpreterFunction(function) => match function.action() {
+                InterpreterFunctionAction::Panic => {
+                    let message = args.get(0).map(|value| {
+                        match value {
+                            Value::Scalar(scalar_value) => if let ScalarValueInner::String(string) = scalar_value.inner() {
+                                string.clone()
+                            } else {
+                                Default::default()
+                            },
+                            _ => Default::default(),
+                        }
+                    }).unwrap_or_default();
+
+                    Err(EvalError::Panic(message))
+                },
+            },
+        }
+    }
+}
+
+impl Debug for FunctionInvocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_tuple("");
+        for arg in &self.args {
+            d.field(arg);
+        }
+        d.finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::typesystem::{ttype::RefinedType, value::{EnumLiteral, EnumValue, LiteralType, ScalarLiteral, ScalarLiteralInner}};
+    use crate::typesystem::value::{EnumLiteral, EnumValue, LiteralType, ScalarLiteralInner};
 
     use super::*;
 
     #[test]
     fn match_expr() {
-        let registry = TypeRegistry::new();
+        let registry = Registry::new();
 
-        let result_ttype = registry.get_id_by_name(RefinedType::RESULT_TYPE_NAME).unwrap();
+        let result_ttype = registry.types().get_id_by_name("Result").unwrap();
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Value(EnumValue::new(
-                &registry, result_ttype.clone(),
-                RefinedType::RESULT_TYPE_OK.parse().unwrap(),
+                registry.types(), result_ttype.clone(),
+                "Ok".parse().unwrap(),
                 ScalarValueInner::Unit.into()
             ).unwrap().into()),
+            ret_type: TTypeId::INT32,
             branches: btreemap! {
-                RefinedType::RESULT_TYPE_OK.parse().unwrap() => Branch {
+                "Ok".parse().unwrap() => Branch {
                     ident: "_".parse().unwrap(),
                     expression: Expression::Value(ScalarValueInner::Int32(10).into()),
                 },
-                RefinedType::RESULT_TYPE_ERR.parse().unwrap() => Branch {
+                "Err".parse().unwrap() => Branch {
                     ident: "_".parse().unwrap(),
                     expression: Expression::Value(ScalarValueInner::Int32(8).into()),
                 },
             },
         })));
 
-        expr.eval_types(&registry, &[]).unwrap();
-        assert_eq!(Value::Scalar(ScalarValueInner::Int32(10).into()), expr.eval(&registry, &[]).unwrap());
+        expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap();
+        assert_eq!(Value::Scalar(ScalarValueInner::Int32(10).into()), expr.eval(&registry, &ScopeValues::EMPTY).unwrap());
 
         let expr = Expression::ControlFlow(Box::new(
             ControlFlow::Match(MatchControlFlow {
-                param: Expression::Value(EnumValue::new(&registry, result_ttype, RefinedType::RESULT_TYPE_OK.parse().unwrap(), ScalarValueInner::Unit.into()).unwrap().into()),
+                param: Expression::Value(EnumValue::new(registry.types(), result_ttype, "Ok".parse().unwrap(), ScalarValueInner::Unit.into()).unwrap().into()),
+                ret_type: TTypeId::INT32,
                 branches: btreemap! {
-                    RefinedType::RESULT_TYPE_OK.parse().unwrap() => Branch {
+                    "Ok".parse().unwrap() => Branch {
                         ident: "_".parse().unwrap(),
                         expression: Expression::Value(ScalarValueInner::Int32(10).into()),
                     },
@@ -780,32 +679,80 @@ mod tests {
             })
         ));
 
-        assert_eq!(TypeError::MissingTag(RefinedType::RESULT_TYPE_ERR.parse().unwrap()), expr.eval_types(&registry, &[]).unwrap_err());
+        assert_eq!(TypeError::MissingTag("Err".parse().unwrap()), expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap_err());
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Value(
                 EnumValue::from_literal(
-                    &registry,
+                    registry.types(),
                     EnumLiteral {
-                        ttype: LiteralType::Name(RefinedType::RESULT_TYPE_NAME.parse().expect("unreachable")),
-                        tag: RefinedType::RESULT_TYPE_ERR.parse().expect("unreachable"),
+                        ttype: LiteralType::Name("Result".parse().expect("unreachable")),
+                        tag: "Err".parse().expect("unreachable"),
                         value: Box::new(ScalarLiteralInner::String("my_error".into()).into()),
                     }
                 ).unwrap().into()
             ),
+            ret_type: TTypeId::STRING,
             branches: btreemap! {
-                RefinedType::RESULT_TYPE_OK.parse().unwrap() => Branch {
+                "Ok".parse().unwrap() => Branch {
                     ident: "_".parse().unwrap(),
                     expression: Expression::Value(ScalarValueInner::String("Ok".into()).into()),
                 },
-                RefinedType::RESULT_TYPE_ERR.parse().unwrap() => Branch {
+                "Err".parse().unwrap() => Branch {
                     ident: "error".parse().unwrap(),
                     expression: Expression::NestedIdent("error".parse().unwrap()),
                 },
             },
         })));
 
-        assert_eq!(TType::Scalar(ScalarType::String), expr.eval_types(&registry, &[]).unwrap());
-        assert_eq!(Value::Scalar(ScalarValueInner::String("my_error".into()).into()), expr.eval(&registry, &[]).unwrap());
+        assert_eq!(TTypeId::Scalar(ScalarType::String), expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap());
+        assert_eq!(Value::Scalar(ScalarValueInner::String("my_error".into()).into()), expr.eval(&registry, &ScopeValues::EMPTY).unwrap());
+    }
+
+    #[test]
+    fn functions() {
+        let registry = Registry::new();
+
+        let expr_panic = Expression::FunctionInvocation(FunctionInvocation {
+            function: "core::unwrap".parse().unwrap(),
+            args: [
+                Expression::Value(
+                    EnumValue::from_literal(
+                        registry.types(),
+                        EnumLiteral {
+                            ttype: LiteralType::Name("Result".parse().expect("unreachable")),
+                            tag: "Err".parse().expect("unreachable"),
+                            value: Box::new(ScalarLiteralInner::String("my_error".into()).into()),
+                        }
+                    ).unwrap().into()
+                ),
+            ].into(),
+        });
+
+        expr_panic.eval_types(&registry, &Default::default()).unwrap();
+        let panic_err = expr_panic.eval(&registry, &Default::default()).unwrap_err();
+
+        assert_eq!(EvalError::Panic("".into()), panic_err);
+
+        let expr_pass = Expression::FunctionInvocation(FunctionInvocation {
+            function: "core::unwrap".parse().unwrap(),
+            args: [
+                Expression::Value(
+                    EnumValue::from_literal(
+                        registry.types(),
+                        EnumLiteral {
+                            ttype: LiteralType::Name("Result".parse().expect("unreachable")),
+                            tag: "Ok".parse().expect("unreachable"),
+                            value: Box::new(ScalarLiteralInner::Unit.into()),
+                        }
+                    ).unwrap().into()
+                ),
+            ].into(),
+        });
+
+        expr_panic.eval_types(&registry, &Default::default()).unwrap();
+        let value = expr_pass.eval(&registry, &Default::default()).unwrap();
+
+        assert_eq!(Value::UNIT, value);
     }
 }

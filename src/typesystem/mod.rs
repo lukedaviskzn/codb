@@ -1,14 +1,13 @@
 use std::fmt::Debug;
 
-use registry::TypeRegistryError;
 use ttype::TType;
 use value::{Value, Literal};
 
-use crate::{expr::ExprError, idents::Ident};
+use crate::{idents::Ident, registry::{FunctionRegistryError, TypeRegistryError}};
 
-pub mod registry;
 pub mod ttype;
 pub mod value;
+pub mod function;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TypeError {
@@ -39,16 +38,17 @@ pub enum TypeError {
         expected: TType,
         got: TType,
     },
-    #[error("refinement failed: {0}")]
-    RefinementFailed(#[from] RefinementFailedError),
+    #[error("function expects {expected} arguments, got {got}")]
+    FunctionArgLen {
+        expected: usize,
+        got: usize,
+    },
+    #[error("function has two arguments named {arg:?}")]
+    FunctionDuplicateArg {
+        arg: Ident,
+    },
     #[error("{0}")]
     TypeRegistryError(#[from] TypeRegistryError),
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum RefinementFailedError {
     #[error("{0}")]
-    Expr(#[from] Box<ExprError>),
-    #[error("{0:?}")]
-    Refinement(String),
+    FunctionRegistryError(#[from] FunctionRegistryError),
 }

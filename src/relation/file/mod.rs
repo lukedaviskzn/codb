@@ -4,7 +4,7 @@ use either::Either;
 use itertools::Itertools;
 use ron::ser::PrettyConfig;
 
-use crate::{idents::IdentTree, relation::memory::MemoryRelation, typesystem::{registry::TypeRegistry, value::Value, TypeError}};
+use crate::{idents::IdentTree, registry::Registry, relation::memory::MemoryRelation, typesystem::{value::Value, TypeError}};
 
 use super::{Relation, RelationRef, Row, Schema};
 
@@ -57,7 +57,7 @@ impl RelationRef for FileRelation {
         &self.schema
     }
 
-    fn range(&self, registry: &TypeRegistry, ident_trees: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError> {
+    fn range(&self, registry: &Registry, ident_trees: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError> {
         let relation = match read_mem_relation(&self.filepath) {
             Ok(relation) => relation,
             Err(err) => return Ok(Either::Left(std::iter::once(Err(err)))),
@@ -70,7 +70,7 @@ impl RelationRef for FileRelation {
 }
 
 impl Relation for FileRelation {
-    fn insert(&mut self, registry: &TypeRegistry, new_row: Row) -> Result<io::Result<bool>, TypeError> {
+    fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<io::Result<bool>, TypeError> {
         let mut relation = match read_mem_relation(&self.filepath) {
             Ok(relation) => relation,
             Err(err) => return Ok(Err(err)),
@@ -84,7 +84,7 @@ impl Relation for FileRelation {
         Ok(write_mem_relation(&self.filepath, &relation).map(|_| inserted))
     }
 
-    fn remove(&mut self, registry: &TypeRegistry, pkey: &super::PKey) -> Result<io::Result<Option<Row>>, TypeError> {
+    fn remove(&mut self, registry: &Registry, pkey: &super::PKey) -> Result<io::Result<Option<Row>>, TypeError> {
         let mut relation = match read_mem_relation(&self.filepath) {
             Ok(relation) => relation,
             Err(err) => return Ok(Err(err)),
@@ -114,26 +114,26 @@ impl Relation for FileRelation {
 mod tests {
     use itertools::Itertools;
 
-    use crate::{expr::{ControlFlow, Expression, IfControlFlow, LogicalOp, Op}, typesystem::{registry::TTypeId, ttype::{RefinedType, StructType, TType}, value::{CompositeValue, EnumValue, ScalarValue, ScalarValueInner, StructValue, Value}}};
+    use crate::{registry::TTypeId, typesystem::{ttype::StructType, value::{CompositeValue, ScalarValue, ScalarValueInner, StructValue}}};
 
     use super::*;
 
     #[test]
     fn file_relation() {
-        fn new_user(registry: &TypeRegistry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
-            StructValue::new(registry, user_ttype_id.clone(), btreemap! {
-                "id".parse().unwrap() => ScalarValue::new(registry, TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
+        fn new_user(registry: &Registry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
+            StructValue::new(registry.types(), user_ttype_id.clone(), btreemap! {
+                "id".parse().unwrap() => ScalarValue::new(registry.types(), TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
                 "active".parse().unwrap() => ScalarValueInner::Bool(active).into(),
             }).unwrap().into()
         }
 
-        fn new_id(registry: &TypeRegistry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
-            StructValue::new(registry, user_id_ttype_id.clone(), btreemap! {
-                "id".parse().unwrap() => ScalarValue::new(registry, TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
+        fn new_id(registry: &Registry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
+            StructValue::new(registry.types(), user_id_ttype_id.clone(), btreemap! {
+                "id".parse().unwrap() => ScalarValue::new(registry.types(), TTypeId::INT32, ScalarValueInner::Int32(id)).unwrap().into(),
             }).unwrap().into()
         }
 
-        let registry = TypeRegistry::new();
+        let registry = Registry::new();
 
         // let result_ttype = registry.get_id_by_name(RefinedType::RESULT_TYPE_NAME).unwrap();
 
@@ -162,14 +162,14 @@ mod tests {
         let user_ttype_id = TTypeId::Anonymous(Box::new(user_struct.clone().into()));
 
         let user_id_struct = user_struct.select(
-            &registry,
+            registry.types(),
             &IdentTree::from_nested_idents(["id".parse().unwrap()])
         ).unwrap();
 
         let user_id_ttype_id = TTypeId::Anonymous(Box::new(user_id_struct.clone().into()));
         
         let user_pkey = IdentTree::from_nested_idents(["id".parse().unwrap()]);
-        let user_schema = Schema::new(&registry, user_struct, user_pkey).unwrap();
+        let user_schema = Schema::new(registry.types(), user_struct, user_pkey).unwrap();
 
         const USERS_PATH: &str = "target/test_file_relation_users_relation.ron";
         const INACTIVE_USERS_PATH: &str = "target/test_file_relation_inactive_users_relation.ron";
