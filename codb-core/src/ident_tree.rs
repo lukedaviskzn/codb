@@ -1,54 +1,19 @@
 use std::fmt::{Debug, Display};
 
-use crate::{Ident, NestedIdent};
+use crate::{Ident, IdentForest};
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentTree {
-    ident: Ident,
-    children: Box<[IdentTree]>,
+    pub(super) ident: Ident,
+    pub(super) children: IdentForest,
 }
 
 impl IdentTree {
-    pub fn from_nested_idents(nested_idents: impl Into<Box<[NestedIdent]>>) -> Box<[IdentTree]> {
-        let mut roots: Vec<&Ident> = vec![];
-
-        let nested_idents: Box<[NestedIdent]> = nested_idents.into();
-
-        for nested_ident in &nested_idents {
-            let ident = &nested_ident[0];
-
-            if !roots.contains(&ident) {
-                roots.push(ident);
-            }
-        }
-
-        let mut trees = Vec::new();
-
-        for root in roots {
-            let mut child_nested_idents = Vec::new();
-
-            for nested_ident in nested_idents.iter().filter(|ni| &ni[0] == root) {
-                let rest = nested_ident.to_vec().split_off(1);
-                
-                if let Ok(child_nested_ident) = NestedIdent::try_from(rest) {
-                    child_nested_idents.push(child_nested_ident);
-                }
-            }
-
-            trees.push(IdentTree {
-                ident: root.clone(),
-                children: Self::from_nested_idents(child_nested_idents),
-            });
-        }
-
-        trees.into()
-    }
-
     pub fn ident(&self) -> &Ident {
         &self.ident
     }
 
-    pub fn children(&self) -> &[IdentTree] {
+    pub fn children(&self) -> &IdentForest {
         &self.children
     }
 }

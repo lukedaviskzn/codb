@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, fmt::Debug};
 
-use codb_core::{Ident, IdentTree};
+use codb_core::{Ident, IdentForest};
 
-use crate::db::registry::{Registry, TTypeId};
+use crate::db::{registry::{Registry, TTypeId}, relation::RowSize};
 
 use super::TypeError;
 
@@ -10,6 +10,7 @@ use super::TypeError;
 pub enum TType {
     Composite(CompositeType),
     Scalar(ScalarType),
+    Array(ArrayType),
 }
 
 impl TType {
@@ -22,12 +23,15 @@ impl TType {
     #[allow(unused)]
     pub const INT32: TType = TType::Scalar(ScalarType::Int32);
     #[allow(unused)]
+    pub const INT64: TType = TType::Scalar(ScalarType::Int64);
+    #[allow(unused)]
     pub const STRING: TType = TType::Scalar(ScalarType::String);
 
-    pub fn select(&self, registry: &Registry, trees: &[IdentTree]) -> Result<TType, TypeError> {
+    pub fn select(&self, registry: &Registry, trees: &IdentForest) -> Result<TType, TypeError> {
         match self {
             TType::Composite(ttype) => Ok(TType::Composite(ttype.select(registry, trees)?)),
             TType::Scalar(ttype) => Ok(TType::Scalar(ttype.select(trees)?)),
+            TType::Array(ttype) => Ok(TType::Array(ttype.select(registry, trees)?)),
         }
     }
 
@@ -35,6 +39,7 @@ impl TType {
         match self {
             TType::Composite(ttype) => ttype.dot(ident),
             TType::Scalar(_) => None,
+            TType::Array(_) => None,
         }
     }
 }
@@ -44,6 +49,7 @@ impl Debug for TType {
         match self {
             Self::Composite(ttype) => Debug::fmt(ttype, f),
             Self::Scalar(ttype) => Debug::fmt(ttype, f),
+            Self::Array(ttype) => Debug::fmt(ttype, f),
         }
     }
 }
@@ -72,6 +78,12 @@ impl From<ScalarType> for TType {
     }
 }
 
+impl From<ArrayType> for TType {
+    fn from(value: ArrayType) -> Self {
+        Self::Array(value)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CompositeType {
     Struct(StructType),
@@ -79,10 +91,10 @@ pub enum CompositeType {
 }
 
 impl CompositeType {
-    pub fn select(&self, registry: &Registry, ident_trees: &[IdentTree]) -> Result<CompositeType, TypeError> {
+    pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<CompositeType, TypeError> {
         match self {
-            CompositeType::Struct(ttype) => Ok(CompositeType::Struct(ttype.select(registry, ident_trees)?)),
-            CompositeType::Enum(ttype) => Ok(CompositeType::Enum(ttype.select(ident_trees)?)),
+            CompositeType::Struct(ttype) => Ok(CompositeType::Struct(ttype.select(registry, ident_forest)?)),
+            CompositeType::Enum(ttype) => Ok(CompositeType::Enum(ttype.select(ident_forest)?)),
         }
     }
 
@@ -131,14 +143,14 @@ impl StructType {
         &self.fields
     }
 
-    pub fn select(&self, registry: &Registry, ident_trees: &[IdentTree]) -> Result<StructType, TypeError> {
-        if ident_trees.is_empty() {
+    pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<StructType, TypeError> {
+        if ident_forest.is_empty() {
             return Ok(self.clone());
         }
 
         let mut new_fields = BTreeMap::new();
         
-        for tree in ident_trees {
+        for tree in ident_forest {
             let ident = tree.ident().clone();
 
             if let Some(ttype_id) = self.fields.get(&ident) {
@@ -189,12 +201,30 @@ impl EnumType {
         }
     }
 
+    pub fn new_option(ttype_id: TTypeId) -> EnumType {
+        EnumType {
+            tags: btreemap! {
+                id!("Some") => ttype_id,
+                id!("None") => TTypeId::UNIT,
+            }
+        }
+    }
+
+    pub fn new_result(ok_ttype_id: TTypeId, err_ttype_id: TTypeId) -> EnumType {
+        EnumType {
+            tags: btreemap! {
+                id!("Ok") => ok_ttype_id,
+                id!("Err") => err_ttype_id,
+            }
+        }
+    }
+
     pub fn tags(&self) -> &BTreeMap<Ident, TTypeId> {
         &self.tags
     }
 
-    pub fn select(&self, ident_trees: &[IdentTree]) -> Result<EnumType, TypeError> {
-        if ident_trees.is_empty() {
+    pub fn select(&self, ident_forest: &IdentForest) -> Result<EnumType, TypeError> {
+        if ident_forest.is_empty() {
             return Ok(self.clone());
         }
 
@@ -206,7 +236,7 @@ impl EnumType {
         }
 
         // all idents must be valid
-        for tree in ident_trees {
+        for tree in ident_forest {
             let ident = tree.ident().clone();
             
             if !self.tags.contains_key(&ident) {
@@ -234,11 +264,12 @@ pub enum ScalarType {
     Unit,
     Bool,
     Int32,
+    Int64,
     String,
 }
 
 impl ScalarType {
-    pub const ALL: [ScalarType; 5] = [ScalarType::Never, ScalarType::Unit, ScalarType::Bool, ScalarType::Int32, ScalarType::String];
+    pub const ALL: [ScalarType; 6] = [ScalarType::Never, ScalarType::Unit, ScalarType::Bool, ScalarType::Int32, ScalarType::Int64, ScalarType::String];
 
     pub fn from_name(name: &str) -> Option<ScalarType> {
         Self::ALL.iter().find(|st| st.name() == name).map(|st| *st)
@@ -250,12 +281,13 @@ impl ScalarType {
             ScalarType::Unit => "()",
             ScalarType::Bool => "bool",
             ScalarType::Int32 => "int32",
+            ScalarType::Int64 => "int64",
             ScalarType::String => "string",
         }
     }
 
-    pub fn select(&self, ident_trees: &[IdentTree]) -> Result<ScalarType, TypeError> {
-        if let Some(first) = ident_trees.first() {
+    pub fn select(&self, ident_forest: &IdentForest) -> Result<ScalarType, TypeError> {
+        if let Some(first) = ident_forest.first() {
             Err(TypeError::ScalarField(first.ident().clone()))
         } else {
             Ok(self.clone())
@@ -266,5 +298,49 @@ impl ScalarType {
 impl Debug for ScalarType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ArrayType {
+    inner_ttype_id: TTypeId,
+    length: Option<RowSize>,
+}
+
+impl ArrayType {
+    pub fn new(inner_ttype_id: TTypeId, length: Option<RowSize>) -> ArrayType {
+        ArrayType {
+            inner_ttype_id,
+            length,
+        }
+    }
+    
+    pub fn inner_ttype_id(&self) -> &TTypeId {
+        &self.inner_ttype_id
+    }
+
+    pub fn length(&self) -> &Option<RowSize> {
+        &self.length
+    }
+
+    pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<ArrayType, TypeError> {
+        let ttype = registry.ttype(&self.inner_ttype_id)
+            .ok_or_else(|| TypeError::TypeNotFound(self.inner_ttype_id.clone()))?;
+
+        Ok(ArrayType {
+            inner_ttype_id: TTypeId::new_anonymous(ttype.select(registry, ident_forest)?),
+            length: self.length.clone(),
+        })
+    }
+}
+
+impl Debug for ArrayType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self.inner_ttype_id(), f)?;
+        if let Some(len) = self.length() {
+            write!(f, "[{len}]")
+        } else {
+            write!(f, "[]")
+        }
     }
 }

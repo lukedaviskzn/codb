@@ -2,11 +2,11 @@ use std::{borrow::Cow, collections::BTreeMap, fmt::Debug};
 
 use codb_core::Ident;
 
-use crate::{db::registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}, typesystem::{ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, StructValue, Value}, TypeError}};
+use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, typesystem::{scope::{ScopeTypes, ScopeValues}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, StructValue, Value}, TypeError}};
 
 use super::{EvalError, Expression};
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ControlFlow {
     If(IfControlFlow),
     Match(MatchControlFlow),
@@ -22,22 +22,22 @@ impl Debug for ControlFlow {
 }
 
 impl ControlFlow {
-    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
-            ControlFlow::If(cf) => cf.eval_types(registry, scopes),
-            ControlFlow::Match(cf) => cf.eval_types(registry, scopes),
+            ControlFlow::If(cf) => cf.eval_types(registry, relations, scopes),
+            ControlFlow::Match(cf) => cf.eval_types(registry, relations, scopes),
         }
     }
 
-    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
-            ControlFlow::If(cf) => cf.eval(registry, scopes),
-            ControlFlow::Match(cf) => cf.eval(registry, scopes),
+            ControlFlow::If(cf) => cf.eval(registry, relations, scopes),
+            ControlFlow::Match(cf) => cf.eval(registry, relations, scopes),
         }
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IfControlFlow {
     pub condition: Expression,
     pub ret_type: TTypeId,
@@ -52,13 +52,13 @@ impl Debug for IfControlFlow {
 }
 
 impl IfControlFlow {
-    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
-        let cond_type_id = self.condition.eval_types(registry, scopes)?;
+    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+        let cond_type_id = self.condition.eval_types(registry, relations, scopes)?;
 
         cond_type_id.must_eq(&TTypeId::BOOL)?;
         
-        let then_type_id = self.then.eval_types(registry, scopes)?;
-        let otherwise_type_id = self.then.eval_types(registry, scopes)?;
+        let then_type_id = self.then.eval_types(registry, relations, scopes)?;
+        let otherwise_type_id = self.then.eval_types(registry, relations, scopes)?;
 
         then_type_id.must_eq(&self.ret_type)?;
         otherwise_type_id.must_eq(&self.ret_type)?;
@@ -66,20 +66,20 @@ impl IfControlFlow {
         Ok(then_type_id)
     }
 
-    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        let cond_value = self.condition.eval(registry, scopes)?;
+    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
+        let cond_value = self.condition.eval(registry, relations, scopes)?;
                 
         cond_value.ttype_id().must_eq(&TTypeId::BOOL)?;
 
         if cond_value == Value::TRUE {
-            self.then.eval(registry, scopes)
+            self.then.eval(registry, relations, scopes)
         } else {
-            self.otherwise.eval(registry, scopes)
+            self.otherwise.eval(registry, relations, scopes)
         }
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MatchControlFlow {
     pub param: Expression,
     pub ret_type: TTypeId,
@@ -102,8 +102,8 @@ impl Debug for MatchControlFlow {
 }
 
 impl MatchControlFlow {
-    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
-        let param_type_id = self.param.eval_types(registry, scopes)?;
+    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+        let param_type_id = self.param.eval_types(registry, relations, scopes)?;
 
         if param_type_id == TTypeId::NEVER {
             return Ok(TTypeId::NEVER);
@@ -151,7 +151,7 @@ impl MatchControlFlow {
             let mut new_scopes = scopes.clone();
             new_scopes.push(Cow::Owned(new_scope));
 
-            let branch_type_id = branch.expression.eval_types(registry, &new_scopes)?;
+            let branch_type_id = branch.expression.eval_types(registry, relations, &new_scopes)?;
 
             branch_type_id.must_eq(&self.ret_type)?;
         }
@@ -159,10 +159,10 @@ impl MatchControlFlow {
         Ok(self.ret_type.clone())
     }
 
-    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
         let scope_types = scopes.types()?;
         
-        let param_type = self.param.eval_types(registry, &scope_types)?;
+        let param_type = self.param.eval_types(registry, relations, &scope_types)?;
         let param_type = registry.ttype(&param_type)
             .ok_or_else(|| TypeError::from(TypeError::TypeNotFound(param_type.clone())))?;
         let TType::Composite(CompositeType::Enum(param_type)) = param_type else {
@@ -172,7 +172,7 @@ impl MatchControlFlow {
             }.into());
         };
 
-        let param_value = self.param.eval(registry, scopes)?;
+        let param_value = self.param.eval(registry, relations, scopes)?;
 
         let param_value = match param_value {
             Value::Composite(CompositeValue::Enum(param_value)) => param_value,
@@ -191,17 +191,17 @@ impl MatchControlFlow {
         }).into());
         
         let new_scope = StructValue::new(registry, scope_type, btreemap! {
-            branch.ident.clone() => param_value.into_value(),
+            branch.ident.clone() => param_value.into_inner_value(),
         })?;
 
         let mut new_scopes = scopes.clone();
         new_scopes.push(Cow::Owned(new_scope));
         
-        branch.expression.eval(registry, &new_scopes)
+        branch.expression.eval(registry, relations, &new_scopes)
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Branch {
     ident: Ident,
     expression: Expression,
@@ -224,13 +224,14 @@ impl Debug for Branch {
 
 #[cfg(test)]
 mod tests {
-    use crate::typesystem::value::{EnumValue, ScalarValue};
+    use crate::{db::relation::memory::MemoryRelation, typesystem::value::{EnumValue, ScalarValue}};
 
     use super::*;
 
     #[test]
     fn match_expr() {
-        let registry = Registry::new();
+        let relations = DbRelations::<MemoryRelation>::new();
+        let registry = Registry::new(&relations);
 
         let result_ttype_id = TTypeId::from(id_path!("Result"));
 
@@ -247,8 +248,8 @@ mod tests {
             },
         })));
 
-        expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap();
-        assert_eq!(Value::Scalar(ScalarValue::Int32(10).into()), expr.eval(&registry, &ScopeValues::EMPTY).unwrap());
+        expr.eval_types(&registry, &relations, &ScopeTypes::EMPTY).unwrap();
+        assert_eq!(Value::Scalar(ScalarValue::Int32(10).into()), expr.eval(&registry, &relations, &ScopeValues::EMPTY).unwrap());
 
         let expr = Expression::ControlFlow(Box::new(
             ControlFlow::Match(MatchControlFlow {
@@ -260,7 +261,7 @@ mod tests {
             })
         ));
 
-        assert_eq!(TypeError::MissingTag(id!("Err")), expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap_err());
+        assert_eq!(TypeError::MissingTag(id!("Err")), expr.eval_types(&registry, &relations, &ScopeTypes::EMPTY).unwrap_err());
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Value(
@@ -278,7 +279,7 @@ mod tests {
             },
         })));
 
-        assert_eq!(TTypeId::Scalar(ScalarType::String), expr.eval_types(&registry, &ScopeTypes::EMPTY).unwrap());
-        assert_eq!(Value::Scalar(ScalarValue::String("my_error".into()).into()), expr.eval(&registry, &ScopeValues::EMPTY).unwrap());
+        assert_eq!(TTypeId::Scalar(ScalarType::String), expr.eval_types(&registry, &relations, &ScopeTypes::EMPTY).unwrap());
+        assert_eq!(Value::Scalar(ScalarValue::String("my_error".into()).into()), expr.eval(&registry, &relations, &ScopeValues::EMPTY).unwrap());
     }
 }

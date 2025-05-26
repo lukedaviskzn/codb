@@ -1,13 +1,16 @@
 use std::{collections::BTreeMap, fmt::{Debug, Display}};
 
-use codb_core::{Ident, IdentTree};
+use codb_core::{Ident, IdentForest};
 
 use crate::{db::registry::{Registry, TTypeId}, typesystem::{ttype::{CompositeType, EnumType, StructType, TType}, TypeError}};
+
+use super::{ttype::ArrayType, TypeSet};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Composite(CompositeValue),
     Scalar(ScalarValue),
+    Array(ArrayValue),
 }
 
 impl Value {
@@ -19,13 +22,15 @@ impl Value {
         match self {
             Value::Composite(value) => value.ttype_id(),
             Value::Scalar(value) => value.ttype_id(),
+            Value::Array(value) => value.ttype_id(),
         }
     }
 
-    pub fn select(&self, registry: &Registry, ident_trees: &[IdentTree]) -> Result<Value, TypeError> {
+    pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<Value, TypeError> {
         match self {
-            Value::Composite(value) => Ok(Value::Composite(value.select(registry, ident_trees)?)),
-            Value::Scalar(value) => Ok(Value::Scalar(value.select(ident_trees)?)),
+            Value::Composite(value) => Ok(Value::Composite(value.select(registry, ident_forest)?)),
+            Value::Scalar(value) => Ok(Value::Scalar(value.select(ident_forest)?)),
+            Value::Array(value) => Ok(Value::Array(value.select(registry, ident_forest)?))
         }
     }
 
@@ -33,6 +38,7 @@ impl Value {
         match self {
             Value::Composite(value) => value.dot(ident),
             Value::Scalar(_) => Err(TypeError::ScalarField(ident.clone())),
+            Value::Array(_) => Err(TypeError::ArrayField(ident.clone()))
         }
     }
 }
@@ -40,8 +46,9 @@ impl Value {
 impl Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Composite(val) => val.fmt(f),
+            Self::Composite(val) => Debug::fmt(val, f),
             Self::Scalar(val) => Debug::fmt(val, f),
+            Self::Array(val) => Debug::fmt(val, f),
         }
     }
 }
@@ -70,6 +77,76 @@ impl From<ScalarValue> for Value {
     }
 }
 
+impl TryInto<CompositeValue> for Value {
+    type Error = TypeError;
+
+    fn try_into(self) -> Result<CompositeValue, Self::Error> {
+        match self {
+            Value::Composite(composite_value) => Ok(composite_value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Composite,
+                got: value,
+            }),
+        }
+    }
+}
+
+    impl TryInto<StructValue> for Value {
+        type Error = TypeError;
+
+        fn try_into(self) -> Result<StructValue, Self::Error> {
+            match self {
+                Value::Composite(CompositeValue::Struct(struct_value)) => Ok(struct_value),
+                value => Err(TypeError::ValueTypeSetInvalid {
+                    expected: TypeSet::Struct,
+                    got: value,
+                }),
+            }
+        }
+}
+
+impl TryInto<EnumValue> for Value {
+    type Error = TypeError;
+
+    fn try_into(self) -> Result<EnumValue, Self::Error> {
+        match self {
+            Value::Composite(CompositeValue::Enum(enum_value)) => Ok(enum_value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Enum,
+                got: value,
+            }),
+        }
+    }
+}
+
+impl TryInto<ArrayValue> for Value {
+    type Error = TypeError;
+
+    fn try_into(self) -> Result<ArrayValue, Self::Error> {
+        match self {
+            Value::Array(array_value) => Ok(array_value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Array,
+                got: value,
+            }),
+        }
+    }
+}
+
+impl TryInto<ScalarValue> for Value {
+    type Error = TypeError;
+
+    fn try_into(self) -> Result<ScalarValue, Self::Error> {
+        match self {
+            Value::Scalar(scalar_value) => Ok(scalar_value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Scalar,
+                got: value,
+            }),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CompositeValue {
     Struct(StructValue),
@@ -84,10 +161,10 @@ impl CompositeValue {
         }
     }
 
-    pub fn select(&self, registry: &Registry, ident_trees: &[IdentTree]) -> Result<CompositeValue, TypeError> {
+    pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<CompositeValue, TypeError> {
         match self {
-            CompositeValue::Struct(value) => Ok(CompositeValue::Struct(value.select(registry, ident_trees)?)),
-            CompositeValue::Enum(value) => Ok(CompositeValue::Enum(value.select(registry, ident_trees)?)),
+            CompositeValue::Struct(value) => Ok(CompositeValue::Struct(value.select(registry, ident_forest)?)),
+            CompositeValue::Enum(value) => Ok(CompositeValue::Enum(value.select(registry, ident_forest)?)),
         }
     }
 
@@ -180,14 +257,14 @@ impl StructValue {
         self.ttype_id.clone()
     }
 
-    pub fn select(&self, registry: &Registry, ident_trees: &[IdentTree]) -> Result<StructValue, TypeError> {
-        if ident_trees.is_empty() {
+    pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<StructValue, TypeError> {
+        if ident_forest.is_empty() {
             return Ok(self.clone());
         }
 
         let mut new_fields = BTreeMap::new();
         
-        for tree in ident_trees {
+        for tree in ident_forest {
             let ident = tree.ident().clone();
             if let Some(value) = self.fields.get(&ident) {
                 new_fields.insert(ident, value.select(registry, tree.children())?);
@@ -205,7 +282,7 @@ impl StructValue {
             })
         };
         
-        let selection_type = struct_type.select(registry, ident_trees)?;
+        let selection_type = struct_type.select(registry, ident_forest)?;
         
         Ok(StructValue {
             ttype_id: TTypeId::new_anonymous(selection_type.into()),
@@ -273,6 +350,38 @@ impl EnumValue {
         }
     }
 
+    pub fn new_option_some(ttype_id: TTypeId, some: Value) -> EnumValue {
+        EnumValue {
+            ttype_id,
+            tag: id!("Some"),
+            value: Box::new(some),
+        }
+    }
+
+    pub fn new_option_none(ttype_id: TTypeId) -> EnumValue {
+        EnumValue {
+            ttype_id,
+            tag: id!("None"),
+            value: Box::new(Value::UNIT),
+        }
+    }
+
+    pub fn new_result_ok(ttype_id: TTypeId, ok: Value) -> EnumValue {
+        EnumValue {
+            ttype_id,
+            tag: id!("Ok"),
+            value: Box::new(ok),
+        }
+    }
+
+    pub fn new_result_err(ttype_id: TTypeId, err: Value) -> EnumValue {
+        EnumValue {
+            ttype_id,
+            tag: id!("Err"),
+            value: Box::new(err),
+        }
+    }
+
     pub fn ttype_id(&self) -> TTypeId {
         self.ttype_id.clone()
     }
@@ -285,12 +394,12 @@ impl EnumValue {
         &self.value
     }
 
-    pub fn into_value(self) -> Value {
+    pub fn into_inner_value(self) -> Value {
         *self.value
     }
 
-    pub fn select(&self, registry: &Registry, ident_trees: &[IdentTree]) -> Result<EnumValue, TypeError> {
-        if ident_trees.is_empty() {
+    pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<EnumValue, TypeError> {
+        if ident_forest.is_empty() {
             return Ok(self.clone());
         }
 
@@ -302,12 +411,12 @@ impl EnumValue {
         };
 
         for tag in ttype.tags().keys() {
-            if ident_trees.iter().all(|tree| tree.ident() != tag) {
+            if ident_forest.iter().all(|tree| tree.ident() != tag) {
                 return Err(TypeError::MissingTag(tag.clone()));
             }
         }
 
-        for tree in ident_trees {
+        for tree in ident_forest {
             if ttype.tags().keys().all(|tag| tag != tree.ident()) {
                 return Err(TypeError::UnknownTag(tree.ident().clone()));
             }
@@ -330,6 +439,7 @@ pub enum ScalarValue {
     Unit,
     Bool(bool),
     Int32(i32),
+    Int64(i64),
     String(String),
 }
 
@@ -339,12 +449,13 @@ impl ScalarValue {
             ScalarValue::Unit => TTypeId::UNIT,
             ScalarValue::Bool(_) => TTypeId::BOOL,
             ScalarValue::Int32(_) => TTypeId::INT32,
+            ScalarValue::Int64(_) => TTypeId::INT64,
             ScalarValue::String(_) => TTypeId::STRING,
         }
     }
 
-    pub fn select(&self, ident_trees: &[IdentTree]) -> Result<ScalarValue, TypeError> {
-        if let Some(first) = ident_trees.first() {
+    pub fn select(&self, ident_forest: &IdentForest) -> Result<ScalarValue, TypeError> {
+        if let Some(first) = ident_forest.first() {
             Err(TypeError::ScalarField(first.ident().clone()))
         } else {
             Ok(self.clone())
@@ -358,6 +469,7 @@ impl Debug for ScalarValue {
             Self::Unit => write!(f, "()"),
             Self::Bool(value) => Debug::fmt(value, f),
             Self::Int32(value) => Debug::fmt(value, f),
+            Self::Int64(value) => Debug::fmt(value, f),
             Self::String(value) => Debug::fmt(value, f),
         }
     }
@@ -369,5 +481,101 @@ impl Display for ScalarValue {
             Self::String(value) => Display::fmt(value, f),
             value => Debug::fmt(value, f),
         }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ArrayValue {
+    inner_ttype_id: TTypeId,
+    entries: Vec<Value>,
+}
+
+impl ArrayValue {
+    pub fn new(registry: &Registry, array_ttype_id: TTypeId, entries: Vec<Value>) -> Result<ArrayValue, TypeError> {
+        let ttype = registry.ttype(&array_ttype_id)
+            .ok_or_else(|| TypeError::TypeNotFound(array_ttype_id.clone()))?;
+
+        let TType::Array(ttype) = ttype else {
+            return Err(TypeError::TypeInvalid {
+                // todo: proper error handling
+                expected: ArrayType::new(TTypeId::NEVER, None).into(),
+                got: ttype,
+            });
+        };
+
+        // check length
+        if let Some(length) = ttype.length() {
+            if entries.len() as u64 != *length {
+                return Err(TypeError::ArrayLen {
+                    expected: *length,
+                    got: entries.len() as u64,
+                });
+            }
+        }
+
+        // check all values are of correct type
+        for entry in &entries {
+            if entry.ttype_id() != *ttype.inner_ttype_id() {
+                return Err(TypeError::TypeIdInvalid {
+                    expected: ttype.inner_ttype_id().clone(),
+                    got: entry.ttype_id(),
+                });
+            }
+        }
+
+        Ok(ArrayValue {
+            inner_ttype_id: array_ttype_id,
+            entries,
+        })
+    }
+
+    pub fn entries(&self) -> &[Value] {
+        &self.entries
+    }
+
+    pub fn ttype_id(&self) -> TTypeId {
+        self.inner_ttype_id.clone()
+    }
+
+    pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<ArrayValue, TypeError> {
+        let array_ttype = registry.ttype(&self.inner_ttype_id)
+            .ok_or_else(|| TypeError::TypeNotFound(self.inner_ttype_id.clone()))?;
+
+        let TType::Array(array_ttype) = array_ttype else {
+            return Err(TypeError::TypeInvalid {
+                expected: ArrayType::new(TTypeId::NEVER, None).into(),
+                got: array_ttype,
+            })
+        };
+
+        let inner_ttype = registry.ttype(array_ttype.inner_ttype_id())
+            .ok_or_else(|| TypeError::TypeNotFound(self.inner_ttype_id.clone()))?;
+
+        let selection_type = inner_ttype.select(registry, ident_forest)?;
+
+        let mut new_entries = vec![];
+
+        for entry in &self.entries {
+            new_entries.push(entry.select(registry, ident_forest)?);
+        }
+
+        Ok(ArrayValue {
+            inner_ttype_id: TTypeId::new_anonymous(selection_type),
+            entries: new_entries,
+        })
+    }
+}
+
+impl Debug for ArrayValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({:?})", self.inner_ttype_id)?;
+
+        let mut list = f.debug_list();
+        
+        for value in &self.entries {
+            list.entry(value);
+        }
+        
+        list.finish()
     }
 }

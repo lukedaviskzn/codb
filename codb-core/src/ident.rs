@@ -1,6 +1,6 @@
-use std::{borrow::Borrow, fmt::{Debug, Display}, ops::{Deref, Index}, str::FromStr};
+use std::{borrow::Borrow, fmt::{Debug, Display}, ops::Deref, str::FromStr};
 
-use crate::{NestedIdent, ParseIdentError};
+use crate::{ParseIdentError};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Ident(String);
@@ -27,22 +27,26 @@ impl FromStr for Ident {
     type Err = ParseIdentError;
 
     fn from_str(string: &str) -> Result<Self, Self::Err> {
-        Ident::try_from(string.to_owned()).map_err(|_| ParseIdentError)
+        Ident::try_from(string.to_owned())
     }
 }
 
 impl TryFrom<String> for Ident {
-    type Error = String;
+    type Error = ParseIdentError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if let Some(char) = value.chars().next() {
-            if (char.is_alphabetic() || char == '_') && value.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                Ok(Ident(value))
-            } else {
-                Err(value)
-            }
+        let Some(first_char) = value.chars().next() else {
+            return Err(ParseIdentError::Empty);
+        };
+        
+        if !first_char.is_alphabetic() && first_char != '_' {
+            return Err(ParseIdentError::InvalidFirstChar(first_char));
+        }
+
+        if let Some(invalid_char) = value.chars().find(|c| !c.is_alphanumeric() && *c != '_') {
+            Err(ParseIdentError::InvalidChar(invalid_char))
         } else {
-            Err(value)
+            Ok(Self(value))
         }
     }
 }

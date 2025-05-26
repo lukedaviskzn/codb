@@ -5,14 +5,15 @@ use module::Module;
 
 mod module;
 
-pub use module::*;
+use crate::{expression::{Branch, ControlFlow, Expression, InterpreterAction, MatchControlFlow}, typesystem::{function::{Function, FunctionArg}, ttype::{ArrayType, CompositeType, EnumType, ScalarType, TType}, value::Value, TypeError}};
 
-use crate::{expression::{Branch, ControlFlow, Expression, FunctionInvocation, MatchControlFlow}, typesystem::{function::{FunctionArg, FunctionEntry, InterpreterFunction, InterpreterFunctionAction, UserFunction}, ttype::{CompositeType, EnumType, ScalarType, TType}, value::Value, TypeError}};
+use super::{relation::Relation, DbRelations};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TTypeId {
     Scalar(ScalarType),
     Composite(CompositeTTypeId),
+    Array(Box<ArrayType>),
 }
 
 impl TTypeId {
@@ -20,11 +21,27 @@ impl TTypeId {
         match ttype {
             TType::Composite(composite_type) => TTypeId::Composite(CompositeTTypeId::Anonymous(Box::new(composite_type))),
             TType::Scalar(scalar_type) => TTypeId::Scalar(scalar_type),
+            TType::Array(array_type) => TTypeId::Array(Box::new(array_type)),
         }
     }
 
     pub fn compatible_with(&self, expected: &TTypeId) -> bool {
-        self == expected || *self == TTypeId::NEVER
+        match self {
+            this if this == expected => true,
+            this if this == &TTypeId::NEVER => true,
+            TTypeId::Array(this) => if let TTypeId::Array(expected) = expected {
+                this.inner_ttype_id().compatible_with(expected.inner_ttype_id())
+                &&
+                if expected.length().is_some() {
+                    this.length() == expected.length()
+                } else {
+                    true
+                }
+            } else {
+                false
+            },
+            _ => false,
+        }
     }
 
     pub fn must_eq(&self, expected: &TTypeId) -> Result<(), TypeError> {
@@ -44,6 +61,7 @@ impl TTypeId {
     pub const UNIT: TTypeId = TTypeId::Scalar(ScalarType::Unit);
     pub const BOOL: TTypeId = TTypeId::Scalar(ScalarType::Bool);
     pub const INT32: TTypeId = TTypeId::Scalar(ScalarType::Int32);
+    pub const INT64: TTypeId = TTypeId::Scalar(ScalarType::Int64);
     pub const STRING: TTypeId = TTypeId::Scalar(ScalarType::String);
 }
 
@@ -52,6 +70,7 @@ impl Debug for TTypeId {
         match self {
             Self::Scalar(ttype) => Debug::fmt(ttype, f),
             Self::Composite(ttype) => Debug::fmt(ttype, f),
+            Self::Array(ttype) => Debug::fmt(ttype, f),
         }
     }
 }
@@ -71,6 +90,12 @@ impl From<CompositeTTypeId> for TTypeId {
 impl From<IdentPath> for TTypeId {
     fn from(path: IdentPath) -> Self {
         TTypeId::Composite(path.into())
+    }
+}
+
+impl From<ArrayType> for TTypeId {
+    fn from(ttype: ArrayType) -> Self {
+        TTypeId::Array(Box::new(ttype))
     }
 }
 
@@ -104,8 +129,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    #[allow(unused)]
-    pub fn new() -> Registry {
+    pub fn new<R: Relation>(relations: &DbRelations<R>) -> Registry {
         let mut registry = Registry {
             root: Module::new(),
         };
@@ -118,19 +142,11 @@ impl Registry {
             }))
             .expect("Result ident is already taken");
 
-        // panic("message")
-        registry.root
-            .add(id!("panic"), ModuleItem::InterpreterFunction(InterpreterFunction::new(
-                [FunctionArg::new(id!("string"), TTypeId::STRING)],
-                TTypeId::NEVER,
-                InterpreterFunctionAction::Panic,
-            )))
-            .expect("`panic` ident is already taken");
-
         // unwrap(result)
         registry.root
-            .add(id!("unwrap"), ModuleItem::UserFunction(UserFunction::new(
+            .add(id!("unwrap"), Function::new(
                 &registry,
+                relations,
                 [FunctionArg::new(id!("result"), id_path!("Result").into())],
                 TTypeId::UNIT,
                 Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
@@ -138,14 +154,12 @@ impl Registry {
                     ret_type: TTypeId::UNIT,
                     branches: btreemap! {
                         id!("Ok") => Branch::new(id!("_"), Expression::Value(Value::UNIT)),
-                        id!("Err") => Branch::new(id!("error"), Expression::FunctionInvocation(
-                            FunctionInvocation::new(id_path!("panic"), [
-                                Expression::NestedIdent(nested_id!("error"))
-                            ])
+                        id!("Err") => Branch::new(id!("error"), Expression::Action(
+                            InterpreterAction::Panic { message: Box::new(Expression::NestedIdent(id!("error").into())) }
                         )),
                     },
                 }))),
-            ).expect("failed to type check `unwrap`")))
+            ).expect("failed to type check `unwrap`"))
             .expect("`unwrap` ident is already taken");
 
         registry
@@ -183,11 +197,12 @@ impl Registry {
                     let module = self.module(mod_path)?;
                     module.ttype(ttype_name).cloned()
                 },
-            }
+            },
+            TTypeId::Array(array_type) => Some((**array_type).clone().into()),
         }
     }
 
-    pub fn function(&self, path: &IdentPath) -> Option<FunctionEntry> {
+    pub fn function(&self, path: &IdentPath) -> Option<&Function> {
         let (function_name, mod_path) = path.split_last();
 
         let module = self.module(mod_path)?;

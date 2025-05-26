@@ -1,10 +1,10 @@
-use std::{borrow::Cow, collections::BTreeMap, sync::RwLock};
+use std::{collections::BTreeMap, panic::catch_unwind, sync::RwLock};
 
 use codb_core::Ident;
-use registry::{Registry, TTypeId};
+use registry::Registry;
 use relation::Relation;
 
-use crate::{query::{DataQuery, Query}, scope::{ScopeTypes, ScopeValues}, typesystem::{ttype::StructType, value::{StructValue, Value}}};
+use crate::{expression::EvalError, query::Query, typesystem::{scope::{ScopeTypes, ScopeValues}, value::Value}};
 
 pub mod registry;
 pub mod relation;
@@ -33,119 +33,40 @@ impl<R: Relation> Db<R> {
     }
 
     #[allow(unused)]
-    pub fn execute(&self, query: Query) {
-        match query {
-            Query::Data(query) => match query {
-                DataQuery::Range {
-                    relation,
-                    ident_trees,
-                    range_start,
-                    range_end,
-                } => {
-                    let db = self.inner.read().unwrap();
-                    let registry = &db.registry;
-
-                    let relations = db.relations.read().unwrap();
-                    let relation = relations.get(&relation).unwrap().read().unwrap();
-                    
-                    let rows = relation.range(registry, ident_trees, (range_start, range_end)).unwrap();
-
-                    for row in rows {
-                        let row = row.unwrap();
-                        dbg!(row);
-                    }
-                },
-                DataQuery::Insert {
-                    relation,
-                    row,
-                } => {
-                    let db = self.inner.read().unwrap();
-                    let registry = &db.registry;
-
-                    let relations = db.relations.read().unwrap();
-                    let mut relation = relations.get(&relation).unwrap().write().unwrap();
-                    
-                    let success = relation.insert(registry, row).unwrap().unwrap();
-
-                    dbg!(success);
-                },
-                DataQuery::Extend {
-                    relation,
-                    rows,
-                } => {
-                    let db = self.inner.read().unwrap();
-                    let registry = &db.registry;
-
-                    let relations = db.relations.read().unwrap();
-                    let mut relation = relations.get(&relation).unwrap().write().unwrap();
-                    
-                    let count = relation.extend(registry, rows).unwrap().unwrap();
-
-                    dbg!(count);
-                },
-                DataQuery::Remove {
-                    relation,
-                    pkey,
-                } => {
-                    let db = self.inner.read().unwrap();
-                    let registry = &db.registry;
-
-                    let relations = db.relations.read().unwrap();
-                    let mut relation = relations.get(&relation).unwrap().write().unwrap();
-                    
-                    let value = relation.remove(registry, &pkey).unwrap().unwrap();
-
-                    dbg!(value);
-                },
-                DataQuery::Retain {
-                    relation,
-                    condition,
-                } => {
+    pub fn execute(&self, query: Query) -> Result<Value, EvalError> {
+        let out = catch_unwind(|| {
+            match query {
+                Query::Data(expression) => {
+                    // todo: fix unwrap
                     let db = self.inner.read().unwrap();
                     let registry = db.registry();
-
-                    let relations = db.relations.read().unwrap();
-                    let mut relation = relations.get(&relation).unwrap().write().unwrap();
-
-                    let scope = StructType::new(btreemap! {
-                        id!("row") => relation.schema().ttype_id(),
-                    });
-
-                    let scope_type_id = TTypeId::new_anonymous(scope.clone().into());
-
-                    let scopes = ScopeTypes::one(Cow::Owned(scope));
-
-                    let ttype_id = condition.eval_types(&registry, &scopes).unwrap();
-                    ttype_id.must_eq(&TTypeId::BOOL).expect("unreachable");
-                    
-                    let rows_removed = relation.retain(|row| {
-                        let scope = StructValue::new(&registry, scope_type_id.clone(), btreemap! {
-                            id!("row") => row.clone(),
-                        }).unwrap();
-
-                        let scopes = ScopeValues::one(Cow::Owned(scope));
-
-                        let result = condition.eval(&registry, &scopes).unwrap();
-                        result == Value::TRUE
-                    }).unwrap();
-
-                    dbg!(rows_removed);
+                    let relations = db.relations().read().unwrap();
+                    expression.eval_types(registry, &relations, &ScopeTypes::EMPTY)?;
+                    expression.eval(registry, &relations, &ScopeValues::EMPTY)
                 },
-            },
+            }
+        });
+
+        match out {
+            Ok(Ok(out)) => Ok(out),
+            Ok(Err(out)) => Err(out),
+            Err(err) => Err(EvalError::UnexpectedPanic(err)),
         }
     }
 }
 
 pub struct DbInner<R: Relation> {
     registry: Registry,
-    relations: RwLock<BTreeMap<Ident, RwLock<R>>>,
+    relations: RwLock<DbRelations<R>>,
 }
 
 impl<R: Relation> DbInner<R> {
     fn new() -> Self {
+        let relations = DbRelations::new();
+        
         Self {
-            registry: Registry::new(),
-            relations: RwLock::new(BTreeMap::new()),
+            registry: Registry::new(&relations),
+            relations: RwLock::new(relations),
         }
     }
 
@@ -159,8 +80,28 @@ impl<R: Relation> DbInner<R> {
     }
 
     #[allow(unused)]
-    pub fn relations(&self) -> &RwLock<BTreeMap<Ident, RwLock<R>>> {
+    pub fn relations(&self) -> &RwLock<DbRelations<R>> {
         &self.relations
+    }
+}
+
+pub struct DbRelations<R: Relation>(BTreeMap<Ident, RwLock<R>>);
+
+impl<R: Relation> DbRelations<R> {
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    pub fn get(&self, relation: &str) -> Option<&RwLock<R>> {
+        self.0.get(relation)
+    }
+
+    pub fn insert(&mut self, name: Ident, relation: R) -> bool {
+        if self.0.contains_key(&name) {
+            return false;
+        }
+        self.0.insert(name, RwLock::new(relation));
+        true
     }
 }
 
@@ -169,11 +110,34 @@ mod tests {
     use core::panic;
     use std::ops::Bound;
 
-    use codb_core::IdentTree;
+    use codb_core::IdentForest;
+    use itertools::Itertools;
 
-    use crate::typesystem::value::ScalarValue;
+    use crate::{expression::{Expression, InterpreterAction}, typesystem::{ttype::{EnumType, StructType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue}}};
 
-    use super::{relation::{memory::MemoryRelation, RelationRef, Schema}, *};
+    use super::{registry::TTypeId, relation::{memory::MemoryRelation, RelationRef, Schema}, *};
+
+    fn db_initial_values(registry: &Registry, ttype: &StructType) -> [StructValue; 3] {
+        let mut rows = [
+            StructValue::new(registry, TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
+                id!("id") => Value::Scalar(ScalarValue::Int32(1).into()),
+                id!("name") => Value::Scalar(ScalarValue::String("Jim Jones".into()).into()),
+                id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
+            }).unwrap().into(),
+            StructValue::new(registry, TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
+                id!("id") => Value::Scalar(ScalarValue::Int32(2).into()),
+                id!("name") => Value::Scalar(ScalarValue::String("Jimboni Jonesi".into()).into()),
+                id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
+            }).unwrap().into(),
+            StructValue::new(registry, TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
+                id!("id") => Value::Scalar(ScalarValue::Int32(-1).into()),
+                id!("name") => Value::Scalar(ScalarValue::String("El Jones, Jim".into()).into()),
+                id!("active") => Value::Scalar(ScalarValue::Bool(false).into()),
+            }).unwrap().into(),
+        ];
+        rows.sort();
+        rows
+    }
 
     fn create_db() -> Db<MemoryRelation> {
         let db = Db::<MemoryRelation>::new();
@@ -191,27 +155,11 @@ mod tests {
 
             let registry = db_inner.registry();
             
-            relations.insert(id!("Rel"), RwLock::new(MemoryRelation::new(
-                Schema::new(registry, my_type.clone(), IdentTree::from_nested_idents([id!("id").into()])).unwrap()
-            )));
+            relations.insert(id!("Rel"), MemoryRelation::new(
+                Schema::new(registry, my_type.clone(), IdentForest::from_nested_idents([id!("id").into()])).unwrap()
+            ));
 
-            relations.get("Rel").unwrap().write().unwrap().extend(&registry, [
-                StructValue::new(registry, TTypeId::new_anonymous(my_type.clone().into()), btreemap! {
-                    id!("id") => Value::Scalar(ScalarValue::Int32(1).into()),
-                    id!("name") => Value::Scalar(ScalarValue::String("Jim Jones".into()).into()),
-                    id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
-                }).unwrap().into(),
-                StructValue::new(registry, TTypeId::new_anonymous(my_type.clone().into()), btreemap! {
-                    id!("id") => Value::Scalar(ScalarValue::Int32(2).into()),
-                    id!("name") => Value::Scalar(ScalarValue::String("Jimboni Jonesi".into()).into()),
-                    id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
-                }).unwrap().into(),
-                StructValue::new(registry, TTypeId::new_anonymous(my_type.clone().into()), btreemap! {
-                    id!("id") => Value::Scalar(ScalarValue::Int32(-1).into()),
-                    id!("name") => Value::Scalar(ScalarValue::String("El Jones, Jim".into()).into()),
-                    id!("active") => Value::Scalar(ScalarValue::Bool(false).into()),
-                }).unwrap().into(),
-            ]).unwrap().unwrap();
+            relations.get("Rel").unwrap().write().unwrap().extend(&registry, db_initial_values(registry, &my_type)).unwrap();
         }
 
         db
@@ -232,25 +180,74 @@ mod tests {
 
         let registry = db.registry();
         
-        relations.insert(id!("Rel"), RwLock::new(MemoryRelation::new(
-            Schema::new(registry, my_type, IdentTree::from_nested_idents([id!("id").into()])).unwrap()
-        )));
+        relations.insert(id!("Rel"), MemoryRelation::new(
+            Schema::new(registry, my_type, IdentForest::from_nested_idents([id!("id").into()])).unwrap()
+        ));
 
         let rel = relations.get("Rel").unwrap().read().unwrap();
         rel.draw(registry);
     }
 
     #[test]
-    fn execute() {
+    fn execute_range_remove() {
         let db = create_db();
 
-        db.execute(Query::Data(DataQuery::Range {
+        let value = db.execute(Query::Data(Expression::Action(InterpreterAction::Range {
             relation: id!("Rel"),
-            ident_trees: [].into(),
-            range_start: Bound::Unbounded,
-            range_end: Bound::Unbounded,
-        }));
-        
-        panic!();
+            ident_forest: IdentForest::empty(),
+            start: Box::new(Bound::Unbounded),
+            end: Box::new(Bound::Unbounded),
+        }))).unwrap();
+
+        let array: ArrayValue = value.try_into().unwrap();
+        let mut entries: Vec<StructValue> = array.entries().iter().map(|entry| entry.clone().try_into().unwrap()).collect_vec();
+
+        let expected_deleted_row: Value;
+        let relation_type_option;
+        let pkey_value: Value;
+        {
+            let db_inner = db.inner.read().unwrap();
+            let registry = db_inner.registry();
+            let relations = db_inner.relations().read().unwrap();
+            let relation = relations.get(&id!("Rel")).unwrap();
+            let relation = relation.read().unwrap();
+
+            assert_eq!(entries, db_initial_values(registry, relation.schema().ttype()));
+
+            expected_deleted_row = entries.remove(0).into();
+
+            let pkey_type = TTypeId::new_anonymous(relation.schema().pkey_ttype(registry).unwrap().into());
+            
+            pkey_value = StructValue::new(
+                registry,
+                pkey_type,
+                btreemap! {
+                    id!("id") => Value::Scalar(ScalarValue::Int32(-1).into()),
+                },
+            ).unwrap().into();
+
+            relation_type_option = EnumType::new_option(relation.schema().ttype_id());
+        }
+
+        let out = db.execute(Query::Data(Expression::Action(InterpreterAction::Remove {
+            relation: id!("Rel"),
+            pkey: Box::new(Expression::Value(pkey_value.clone())),
+        }))).unwrap();
+
+        let out: EnumValue = out.try_into().unwrap();
+        let out = out.into_inner_value();
+
+        assert_eq!(expected_deleted_row, out);
+
+        let out = db.execute(Query::Data(Expression::Action(InterpreterAction::Remove {
+            relation: id!("Rel"),
+            pkey: Box::new(Expression::Value(pkey_value.clone())),
+        }))).unwrap();
+
+        let out: EnumValue = out.try_into().unwrap();
+
+        let expected_none = EnumValue::new_option_none(TTypeId::new_anonymous(relation_type_option.into()));
+
+        assert_eq!(expected_none, out);
     }
 }

@@ -1,15 +1,15 @@
-use std::{collections::BTreeMap, io, ops::{Bound, RangeBounds}};
+use std::{collections::BTreeMap, ops::{Bound, RangeBounds}};
 
-use codb_core::IdentTree;
+use codb_core::IdentForest;
 
-use crate::{db::registry::{Registry, TTypeId}, typesystem::{value::Value, TypeError}};
+use crate::{db::registry::{Registry, TTypeId}, typesystem::TypeError};
 
-use super::{PKey, Relation, RelationRef, Row, RowSize, Schema};
+use super::{Key, Relation, RelationRef, Row, RowSize, Schema};
 
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryRelation {
     schema: Schema,
-    rows: BTreeMap<PKey, Row>,
+    rows: BTreeMap<Key, Row>,
 }
 
 impl MemoryRelation {
@@ -21,13 +21,13 @@ impl MemoryRelation {
     }
 }
 
-enum MemRelationIter<T: Iterator<Item = io::Result<Row>>, U: Iterator<Item = io::Result<Row>>> {
+enum MemRelationIter<T: Iterator<Item = Row>, U: Iterator<Item = Row>> {
     Index(T),
     Scan(U),
 }
 
-impl<T: Iterator<Item = io::Result<Row>>, U: Iterator<Item = io::Result<Row>>> Iterator for MemRelationIter<T, U> {
-    type Item = io::Result<Row>;
+impl<T: Iterator<Item = Row>, U: Iterator<Item = Row>> Iterator for MemRelationIter<T, U> {
+    type Item = Row;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
@@ -42,9 +42,8 @@ impl RelationRef for MemoryRelation {
         &self.schema
     }
 
-    fn range(&self, registry: &Registry, ident_trees: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError> {
-        let ident_trees = Into::<Box<[IdentTree]>>::into(ident_trees);
-        let selected_type = self.schema.ttype.select(registry, &ident_trees)?;
+    fn range(&self, registry: &Registry, ident_forest: &IdentForest, range: impl RangeBounds<Key>) -> Result<impl Iterator<Item = Row>, TypeError> {
+        let selected_type = self.schema.ttype.select(registry, ident_forest)?;
 
         let selected_type_id = TTypeId::new_anonymous(selected_type.clone().into());
 
@@ -57,16 +56,16 @@ impl RelationRef for MemoryRelation {
         }
 
         if selected_type.eq(&self.schema.pkey_ttype(registry)?) {
-            Ok(MemRelationIter::Index(self.rows.range(range).map(|(_, row)| Ok(row.clone()))))
+            Ok(MemRelationIter::Index(self.rows.range(range).map(|(_, row)| row.clone())))
         } else {
             let owned_range = (range.start_bound().cloned(), range.end_bound().cloned());
-            Ok(MemRelationIter::Scan(self.rows.iter().filter(move |(pkey, _)| owned_range.contains(pkey)).map(|(_, row)| Ok(row.clone()))))
+            Ok(MemRelationIter::Scan(self.rows.iter().filter(move |(pkey, _)| owned_range.contains(pkey)).map(|(_, row)| row.clone())))
         }
     }
 }
 
 impl Relation for MemoryRelation {
-    fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<io::Result<bool>, TypeError> {
+    fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<bool, TypeError> {
         let schema_ttype_id = self.schema.ttype_id();
 
         new_row.ttype_id().must_eq(&schema_ttype_id)?;
@@ -74,27 +73,27 @@ impl Relation for MemoryRelation {
         let pkey = new_row.select(registry, &self.schema.pkey)?;
         
         if self.rows.contains_key(&pkey) {
-            Ok(Ok(false))
+            Ok(false)
         } else {
             self.rows.insert(pkey, new_row);
-            Ok(Ok(true))
+            Ok(true)
         }
     }
 
-    fn remove(&mut self, registry: &Registry, pkey: &PKey) -> Result<io::Result<Option<Row>>, TypeError> {
+    fn remove(&mut self, registry: &Registry, pkey: &Key) -> Result<Option<Row>, TypeError> {
         let pkey_ttype = self.schema.pkey_ttype(registry)?;
         let pkey_ttype_id = TTypeId::new_anonymous(pkey_ttype.clone().into());
 
         pkey_ttype_id.must_eq(&pkey.ttype_id())?;
 
-        Ok(Ok(self.rows.remove(pkey)))
+        Ok(self.rows.remove(pkey))
     }
 
-    fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> io::Result<RowSize> {
+    fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> RowSize {
         let old_len = self.rows.len();
         self.rows.retain(|_, row| predicate(row));
         let delta_len = old_len - self.rows.len();
-        Ok(delta_len as RowSize)
+        delta_len as RowSize
     }
 }
 
@@ -102,26 +101,26 @@ impl Relation for MemoryRelation {
 mod tests {
     use itertools::Itertools;
 
-    use crate::{typesystem::{ttype::StructType, value::{CompositeValue, ScalarValue, StructValue}}};
+    use crate::{db::DbRelations, typesystem::{ttype::StructType, value::{ScalarValue, StructValue}}};
 
     use super::*;
 
     #[test]
     fn memory_relation() {
-        fn new_user(registry: &Registry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
+        fn new_user(registry: &Registry, user_ttype_id: &TTypeId, id: i32, active: bool) -> StructValue {
             StructValue::new(registry, user_ttype_id.clone(), btreemap! {
                 id!("id") => ScalarValue::Int32(id).into(),
                 id!("active") => ScalarValue::Bool(active).into(),
-            }).unwrap().into()
+            }).unwrap()
         }
 
-        fn new_id(registry: &Registry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
+        fn new_id(registry: &Registry, user_id_ttype_id: &TTypeId, id: i32) -> StructValue {
             StructValue::new(registry, user_id_ttype_id.clone(), btreemap! {
                 id!("id") => ScalarValue::Int32(id).into(),
-            }).unwrap().into()
+            }).unwrap()
         }
 
-        let registry = Registry::new();
+        let registry = Registry::new(&DbRelations::<MemoryRelation>::new());
 
         let user_struct = StructType::new(btreemap! {
             id!("id") => TTypeId::INT32,
@@ -132,45 +131,44 @@ mod tests {
 
         let user_id_struct = user_struct.select(
             &registry,
-            &IdentTree::from_nested_idents([id!("id").into()])
+            &IdentForest::from_nested_idents([id!("id").into()])
         ).unwrap();
 
         let user_id_ttype_id = TTypeId::new_anonymous(user_id_struct.clone().into());
 
-        let user_pkey = IdentTree::from_nested_idents([id!("id").into()]);
+        let user_pkey = IdentForest::from_nested_idents([id!("id").into()]);
         let user_schema = Schema::new(&registry, user_struct, user_pkey).unwrap();
 
         let mut users = MemoryRelation::new(user_schema.clone());
         let mut inactive_users = MemoryRelation::new(user_schema.clone());
 
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap().unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 1, true)).unwrap().unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 2, true)).unwrap().unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 3, false)).unwrap().unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 4, true)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 1, true)).unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 2, true)).unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 3, false)).unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 4, true)).unwrap();
 
-        let new_rows = users.range(&registry, [], ..).unwrap()
-            .map(|r| r.unwrap())
+        let empty_forest = IdentForest::empty();
+
+        let new_rows = users.range(&registry, &empty_forest, ..).unwrap()
             .filter_map(|row| {
-                let Value::Composite(CompositeValue::Struct(value)) = row.clone() else { unreachable!() };
-
-                value.fields().get("active")
+                row.fields().get("active")
                     .filter(|value| **value == ScalarValue::Bool(false).into())
-                    .map(|_| row)
+                    .map(|_| row.clone())
             });
-        inactive_users.extend(&registry, new_rows).unwrap().unwrap();
+        inactive_users.extend(&registry, new_rows).unwrap();
 
         let mut inactive_users_expected = MemoryRelation::new(user_schema.clone());
 
         let user_3 = new_user(&registry, &user_ttype_id, 3, false);
 
-        inactive_users_expected.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap().unwrap();
-        inactive_users_expected.insert(&registry, user_3.clone()).unwrap().unwrap();
+        inactive_users_expected.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap();
+        inactive_users_expected.insert(&registry, user_3.clone()).unwrap();
 
         assert_eq!(inactive_users_expected, inactive_users);
         
         // cannot insert again
-        assert_eq!(false, inactive_users.insert(&registry, user_3).unwrap().unwrap());
+        assert_eq!(false, inactive_users.insert(&registry, user_3).unwrap());
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &TTypeId::Scalar(ScalarType::Bool), vec![]).unwrap())).unwrap_err();
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &TTypeId::Scalar(ScalarType::Bool), vec![FieldValue::new("id", Value::Scalar(ScalarValueInner::Int32(2)))]).unwrap())).unwrap_err();
 
@@ -180,7 +178,7 @@ mod tests {
         assert_eq!(2, users_range.len());
 
         for (i, user) in users_range {
-            assert_eq!(user.unwrap(), new_user(&registry, &user_ttype_id, i as i32 + 1, true));
+            assert_eq!(user, new_user(&registry, &user_ttype_id, i as i32 + 1, true));
         }
     }
 }

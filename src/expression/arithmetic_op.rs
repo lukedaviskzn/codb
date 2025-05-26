@@ -1,11 +1,11 @@
 use std::fmt::Debug;
 
-use crate::{db::registry::{Registry, TTypeId}, scope::{ScopeTypes, ScopeValues}, typesystem::{value::{ScalarValue, Value}, TypeError}};
+use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, typesystem::{scope::{ScopeTypes, ScopeValues}, value::{ScalarValue, Value}, TypeError}};
 
 use super::{EvalError, Expression};
 
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ArithmeticOp {
     Add(Expression, Expression),
     Sub(Expression, Expression),
@@ -25,14 +25,14 @@ impl Debug for ArithmeticOp {
 }
 
 impl ArithmeticOp {
-    pub fn eval_types(&self, registry: &Registry, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
             ArithmeticOp::Add(left, right) |
             ArithmeticOp::Sub(left, right) |
             ArithmeticOp::Mul(left, right) |
             ArithmeticOp::Div(left, right) => {
-                let left_ttype_id = left.eval_types(registry, scopes)?;
-                let right_ttype_id = right.eval_types(registry, scopes)?;
+                let left_ttype_id = left.eval_types(registry, relations, scopes)?;
+                let right_ttype_id = right.eval_types(registry, relations, scopes)?;
                 
                 left_ttype_id.must_eq(&TTypeId::INT32)?;
                 right_ttype_id.must_eq(&TTypeId::INT32)?;
@@ -42,14 +42,14 @@ impl ArithmeticOp {
         }
     }
 
-    pub fn eval(&self, registry: &Registry, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
         let (left, right) = match self {
             ArithmeticOp::Add(left, right) |
             ArithmeticOp::Sub(left, right) |
             ArithmeticOp::Mul(left, right) |
             ArithmeticOp::Div(left, right) => {
-                let left = left.eval(registry, scopes)?;
-                let right = right.eval(registry, scopes)?;
+                let left = left.eval(registry, relations, scopes)?;
+                let right = right.eval(registry, relations, scopes)?;
                 
                 left.ttype_id().must_eq(&TTypeId::INT32)?;
                 right.ttype_id().must_eq(&TTypeId::INT32)?;

@@ -1,13 +1,12 @@
 use std::{fs::File, io::{self, Write}, ops::RangeBounds, path::{Path, PathBuf}};
 
-use codb_core::IdentTree;
-use either::Either;
+use codb_core::IdentForest;
 use itertools::Itertools;
 use ron::ser::PrettyConfig;
 
-use crate::{db::registry::Registry, typesystem::{value::Value, TypeError}};
+use crate::{db::registry::Registry, typesystem::TypeError};
 
-use super::{memory::MemoryRelation, Relation, RelationRef, Row, Schema};
+use super::{memory::MemoryRelation, Key, Relation, RelationRef, Row, RowSize, Schema};
 
 #[derive(Debug)]
 pub struct FileRelation {
@@ -60,56 +59,44 @@ impl RelationRef for FileRelation {
         &self.schema
     }
 
-    fn range(&self, registry: &Registry, ident_trees: impl Into<Box<[IdentTree]>>, range: impl RangeBounds<Value>) -> Result<impl Iterator<Item = io::Result<Row>>, TypeError> {
-        let relation = match read_mem_relation(&self.filepath) {
-            Ok(relation) => relation,
-            Err(err) => return Ok(Either::Left(std::iter::once(Err(err)))),
-        };
+    fn range(&self, registry: &Registry, ident_forest: &IdentForest, range: impl RangeBounds<Key>) -> Result<impl Iterator<Item = Row>, TypeError> {
+        let relation = read_mem_relation(&self.filepath).expect("failed to read from file");
 
-        let rows = relation.range(registry, ident_trees, range)?.collect_vec();
+        let rows = relation.range(registry, ident_forest, range)?.collect_vec();
 
-        Ok(Either::Right(rows.into_iter()))
+        Ok(rows.into_iter())
     }
 }
 
 impl Relation for FileRelation {
-    fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<io::Result<bool>, TypeError> {
-        let mut relation = match read_mem_relation(&self.filepath) {
-            Ok(relation) => relation,
-            Err(err) => return Ok(Err(err)),
-        };
+    fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<bool, TypeError> {
+        let mut relation = read_mem_relation(&self.filepath).expect("failed to read from file");
 
-        let inserted = match relation.insert(registry, new_row)? {
-            Ok(inserted) => inserted,
-            Err(err) => return Ok(Err(err)),
-        };
+        let inserted = relation.insert(registry, new_row)?;
 
-        Ok(write_mem_relation(&self.filepath, &relation).map(|_| inserted))
+        write_mem_relation(&self.filepath, &relation).expect("failed to write to file");
+
+        Ok(inserted)
     }
 
-    fn remove(&mut self, registry: &Registry, pkey: &super::PKey) -> Result<io::Result<Option<Row>>, TypeError> {
-        let mut relation = match read_mem_relation(&self.filepath) {
-            Ok(relation) => relation,
-            Err(err) => return Ok(Err(err)),
-        };
+    fn remove(&mut self, registry: &Registry, pkey: &super::Key) -> Result<Option<Row>, TypeError> {
+        let mut relation = read_mem_relation(&self.filepath).expect("failed to read from file");
 
-        let old_row = match relation.remove(registry, pkey)? {
-            Ok(old_row) => old_row,
-            Err(err) => return Ok(Err(err)),
-        };
+        let old_row = relation.remove(registry, pkey)?;
 
-        Ok(write_mem_relation(&self.filepath, &relation).map(|_| old_row))
+        write_mem_relation(&self.filepath, &relation).expect("failed to write to file");
+
+        Ok(old_row)
     }
 
-    fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> io::Result<super::RowSize> {
-        let mut relation = match read_mem_relation(&self.filepath) {
-            Ok(relation) => relation,
-            Err(err) => return Err(err),
-        };
+    fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> RowSize {
+        let mut relation = read_mem_relation(&self.filepath).expect("failed to read from file");
 
-        let count = relation.retain(predicate)?;
+        let count = relation.retain(predicate);
 
-        write_mem_relation(&self.filepath, &relation).map(|_| count)
+        write_mem_relation(&self.filepath, &relation).expect("failed to write to file");
+
+        count
     }
 }
 
@@ -117,26 +104,26 @@ impl Relation for FileRelation {
 mod tests {
     use itertools::Itertools;
 
-    use crate::{db::registry::TTypeId, typesystem::{ttype::StructType, value::{CompositeValue, ScalarValue, StructValue}}};
+    use crate::{db::{registry::TTypeId, DbRelations}, typesystem::{ttype::StructType, value::{ScalarValue, StructValue, Value}}};
 
     use super::*;
 
     #[test]
     fn file_relation() {
-        fn new_user(registry: &Registry, user_ttype_id: &TTypeId, id: i32, active: bool) -> Value {
+        fn new_user(registry: &Registry, user_ttype_id: &TTypeId, id: i32, active: bool) -> StructValue {
             StructValue::new(registry, user_ttype_id.clone(), btreemap! {
                 id!("id") => ScalarValue::Int32(id).into(),
                 id!("active") => ScalarValue::Bool(active).into(),
-            }).unwrap().into()
+            }).unwrap()
         }
 
-        fn new_id(registry: &Registry, user_id_ttype_id: &TTypeId, id: i32) -> Value {
+        fn new_id(registry: &Registry, user_id_ttype_id: &TTypeId, id: i32) -> StructValue {
             StructValue::new(registry, user_id_ttype_id.clone(), btreemap! {
                 id!("id") => ScalarValue::Int32(id).into(),
-            }).unwrap().into()
+            }).unwrap()
         }
 
-        let registry = Registry::new();
+        let registry = Registry::new(&DbRelations::<FileRelation>::new());
 
         // let result_ttype = registry.get_id_by_name(RefinedType::RESULT_TYPE_NAME).unwrap();
 
@@ -166,12 +153,12 @@ mod tests {
 
         let user_id_struct = user_struct.select(
             &registry,
-            &IdentTree::from_nested_idents([id!("id").into()])
+            &IdentForest::from_nested_idents([id!("id").into()])
         ).unwrap();
 
         let user_id_ttype_id = TTypeId::new_anonymous(user_id_struct.clone().into());
         
-        let user_pkey = IdentTree::from_nested_idents([id!("id").into()]);
+        let user_pkey = IdentForest::from_nested_idents([id!("id").into()]);
         let user_schema = Schema::new(&registry, user_struct, user_pkey).unwrap();
 
         const USERS_PATH: &str = "target/test_file_relation_users_relation.ron";
@@ -180,35 +167,34 @@ mod tests {
         let mut users = FileRelation::new(user_schema.clone(), USERS_PATH).unwrap();
         let mut inactive_users = FileRelation::new(user_schema.clone(), INACTIVE_USERS_PATH).unwrap();
 
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap().unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 1, true)).unwrap().unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 2, true)).unwrap().unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 3, false)).unwrap().unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 4, true)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 1, true)).unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 2, true)).unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 3, false)).unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 4, true)).unwrap();
 
-        let new_rows = users.range(&registry, [], ..).unwrap()
-            .map(|r| r.unwrap())
+        let empty_forest = IdentForest::empty();
+
+        let new_rows = users.range(&registry, &empty_forest, ..).unwrap()
             .filter_map(|row| {
-                let Value::Composite(CompositeValue::Struct(value)) = row.clone() else { unreachable!() };
-
-                value.fields().get("active")
-                    .filter(|value| **value == Value::Scalar(ScalarValue::Bool(false).into()))
-                    .map(|_| row)
+                row.fields().get("active")
+                    .filter(|value| **value == Value::FALSE)
+                    .map(|_| row.clone())
             });
         
-        inactive_users.extend(&registry, new_rows).unwrap().unwrap();
+        inactive_users.extend(&registry, new_rows).unwrap();
 
         let mut inactive_users_expected = MemoryRelation::new(user_schema.clone());
 
         let user_3 = new_user(&registry, &user_ttype_id, 3, false);
 
-        inactive_users_expected.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap().unwrap();
-        inactive_users_expected.insert(&registry, user_3.clone()).unwrap().unwrap();
+        inactive_users_expected.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap();
+        inactive_users_expected.insert(&registry, user_3.clone()).unwrap();
 
         assert!(RelationRef::eq(&inactive_users_expected, &registry, &inactive_users));
         
         // cannot insert again
-        assert_eq!(false, inactive_users.insert(&registry, user_3).unwrap().unwrap());
+        assert_eq!(false, inactive_users.insert(&registry, user_3).unwrap());
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &user_ttype_id, []).unwrap())).unwrap_err();
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &user_ttype_id, [FieldValue::new("id", Value::Scalar(ScalarValueInner::Int32(2)))]).unwrap())).unwrap_err();
 
@@ -218,10 +204,10 @@ mod tests {
         assert_eq!(2, users_range.len());
 
         for (i, user) in users_range {
-            assert_eq!(user.unwrap(), new_user(&registry, &user_ttype_id, i as i32 + 1, true));
+            assert_eq!(user, new_user(&registry, &user_ttype_id, i as i32 + 1, true));
         }
 
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 499, true)).unwrap().unwrap();
+        users.insert(&registry, new_user(&registry, &user_ttype_id, 499, true)).unwrap();
         // users.insert(&registry, new_user(&registry, &user_ttype_id, 500, true)).unwrap_err();
         // users.insert(&registry, new_user(&registry, &user_ttype_id, 501, true)).unwrap_err();
 

@@ -45,7 +45,7 @@ impl FromStr for NestedIdent {
 
     fn from_str(string: &str) -> Result<Self, Self::Err> {
         if string.is_empty() {
-            return Err(ParseIdentError);
+            return Err(ParseIdentError::Empty);
         }
 
         let mut idents = vec![];

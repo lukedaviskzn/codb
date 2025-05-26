@@ -2,14 +2,13 @@ use std::{collections::BTreeMap, fmt::Debug};
 
 use codb_core::Ident;
 
-use crate::{error::IdentTaken, typesystem::{function::{FunctionEntry, InterpreterFunction, UserFunction}, ttype::TType}};
+use crate::{error::IdentTaken, typesystem::{function::Function, ttype::TType}};
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleItem {
     Module(Module),
     TType(TType),
-    UserFunction(UserFunction),
-    InterpreterFunction(InterpreterFunction),
+    Function(Function),
 }
 
 impl From<Module> for ModuleItem {
@@ -18,9 +17,9 @@ impl From<Module> for ModuleItem {
     }
 }
 
-impl From<UserFunction> for ModuleItem {
-    fn from(value: UserFunction) -> Self {
-        Self::UserFunction(value)
+impl From<Function> for ModuleItem {
+    fn from(value: Function) -> Self {
+        Self::Function(value)
     }
 }
 
@@ -35,13 +34,12 @@ impl Debug for ModuleItem {
         match self {
             Self::Module(module) => Debug::fmt(module, f),
             Self::TType(ttype) => Debug::fmt(ttype, f),
-            Self::UserFunction(function) => Debug::fmt(function, f),
-            Self::InterpreterFunction(function) => Debug::fmt(function, f),
+            Self::Function(function) => Debug::fmt(function, f),
         }
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Module {
     items: BTreeMap<Ident, ModuleItem>,
 }
@@ -83,11 +81,11 @@ impl Module {
         }
     }
 
-    pub fn function(&self, ident: &Ident) -> Option<FunctionEntry> {
-        match self.items.get(ident)? {
-            ModuleItem::UserFunction(function) => Some(FunctionEntry::UserFunction(function)),
-            ModuleItem::InterpreterFunction(function) => Some(FunctionEntry::InterpreterFunction(function)),
-            _ => None,
+    pub fn function(&self, ident: &Ident) -> Option<&Function> {
+        if let ModuleItem::Function(function) = self.items.get(ident)? {
+            Some(function)
+        } else {
+            None
         }
     }
 
