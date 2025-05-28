@@ -80,24 +80,16 @@ impl LogicalOp {
                 let left = left.eval(registry, relations, scopes)?;
                 let right = right.eval(registry, relations, scopes)?;
 
-                left.ttype_id().must_eq(&TTypeId::BOOL)?;
-                right.ttype_id().must_eq(&TTypeId::BOOL)?;
-                
                 Ok(ScalarValue::Bool(left == Value::TRUE && right == Value::TRUE).into())
             },
             LogicalOp::Or(left, right) => {
                 let left = left.eval(registry, relations, scopes)?;
                 let right = right.eval(registry, relations, scopes)?;
                 
-                left.ttype_id().must_eq(&TTypeId::BOOL)?;
-                right.ttype_id().must_eq(&TTypeId::BOOL)?;
-                
                 Ok(ScalarValue::Bool(left == Value::TRUE || right == Value::TRUE).into())
             },
             LogicalOp::Not(expr) => {
                 let value = expr.eval(registry, relations, scopes)?;
-                
-                value.ttype_id().must_eq(&TTypeId::BOOL)?;
                 
                 Ok(ScalarValue::Bool(value == Value::FALSE).into())
             },
@@ -105,16 +97,11 @@ impl LogicalOp {
                 let left = left.eval(registry, relations, scopes)?;
                 let right = right.eval(registry, relations, scopes)?;
                 
-                right.ttype_id().must_eq(&left.ttype_id())?;
-                
                 Ok(ScalarValue::Bool(left == right).into())
             },
             LogicalOp::Lt(left, right) => {
                 let left = left.eval(registry, relations, scopes)?;
                 let right = right.eval(registry, relations, scopes)?;
-                
-                left.ttype_id().must_eq(&TTypeId::INT32)?;
-                right.ttype_id().must_eq(&TTypeId::INT32)?;
                 
                 Ok(ScalarValue::Bool(left < right).into())
             },
@@ -122,26 +109,17 @@ impl LogicalOp {
                 let left = left.eval(registry, relations, scopes)?;
                 let right = right.eval(registry, relations, scopes)?;
                 
-                left.ttype_id().must_eq(&TTypeId::INT32)?;
-                right.ttype_id().must_eq(&TTypeId::INT32)?;
-                
                 Ok(ScalarValue::Bool(left > right).into())
             },
             LogicalOp::Lte(left, right) => {
                 let left = left.eval(registry, relations, scopes)?;
                 let right = right.eval(registry, relations, scopes)?;
                 
-                left.ttype_id().must_eq(&TTypeId::INT32)?;
-                right.ttype_id().must_eq(&TTypeId::INT32)?;
-                
                 Ok(ScalarValue::Bool(left <= right).into())
             },
             LogicalOp::Gte(left, right) => {
                 let left = left.eval(registry, relations, scopes)?;
                 let right = right.eval(registry, relations, scopes)?;
-                
-                left.ttype_id().must_eq(&TTypeId::INT32)?;
-                right.ttype_id().must_eq(&TTypeId::INT32)?;
                 
                 Ok(ScalarValue::Bool(left >= right).into())
             },

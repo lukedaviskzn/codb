@@ -7,7 +7,7 @@ use crate::{error::IdentTaken, typesystem::{function::Function, ttype::TType}};
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleItem {
     Module(Module),
-    TType(TType),
+    TType(TType), // todo: only allow composite types
     Function(Function),
 }
 

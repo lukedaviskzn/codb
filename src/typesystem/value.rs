@@ -1,12 +1,12 @@
-use std::{collections::BTreeMap, fmt::{Debug, Display}};
+use std::{cmp::Ordering, collections::BTreeMap, fmt::{Debug, Display}};
 
 use codb_core::{Ident, IdentForest};
 
-use crate::{db::registry::{Registry, TTypeId}, typesystem::{ttype::{CompositeType, EnumType, StructType, TType}, TypeError}};
+use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, expression::{debug_db_array, debug_db_enum, debug_db_struct, StructLiteral}, typesystem::{ttype::{CompositeType, EnumType, StructType, TType}, TypeError}};
 
-use super::{ttype::ArrayType, TypeSet};
+use super::{scope::ScopeTypes, ttype::ArrayType, TypeSet};
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Composite(CompositeValue),
     Scalar(ScalarValue),
@@ -77,77 +77,13 @@ impl From<ScalarValue> for Value {
     }
 }
 
-impl TryInto<CompositeValue> for Value {
-    type Error = TypeError;
-
-    fn try_into(self) -> Result<CompositeValue, Self::Error> {
-        match self {
-            Value::Composite(composite_value) => Ok(composite_value),
-            value => Err(TypeError::ValueTypeSetInvalid {
-                expected: TypeSet::Composite,
-                got: value,
-            }),
-        }
+impl From<ArrayValue> for Value {
+    fn from(value: ArrayValue) -> Self {
+        Self::Array(value)
     }
 }
 
-    impl TryInto<StructValue> for Value {
-        type Error = TypeError;
-
-        fn try_into(self) -> Result<StructValue, Self::Error> {
-            match self {
-                Value::Composite(CompositeValue::Struct(struct_value)) => Ok(struct_value),
-                value => Err(TypeError::ValueTypeSetInvalid {
-                    expected: TypeSet::Struct,
-                    got: value,
-                }),
-            }
-        }
-}
-
-impl TryInto<EnumValue> for Value {
-    type Error = TypeError;
-
-    fn try_into(self) -> Result<EnumValue, Self::Error> {
-        match self {
-            Value::Composite(CompositeValue::Enum(enum_value)) => Ok(enum_value),
-            value => Err(TypeError::ValueTypeSetInvalid {
-                expected: TypeSet::Enum,
-                got: value,
-            }),
-        }
-    }
-}
-
-impl TryInto<ArrayValue> for Value {
-    type Error = TypeError;
-
-    fn try_into(self) -> Result<ArrayValue, Self::Error> {
-        match self {
-            Value::Array(array_value) => Ok(array_value),
-            value => Err(TypeError::ValueTypeSetInvalid {
-                expected: TypeSet::Array,
-                got: value,
-            }),
-        }
-    }
-}
-
-impl TryInto<ScalarValue> for Value {
-    type Error = TypeError;
-
-    fn try_into(self) -> Result<ScalarValue, Self::Error> {
-        match self {
-            Value::Scalar(scalar_value) => Ok(scalar_value),
-            value => Err(TypeError::ValueTypeSetInvalid {
-                expected: TypeSet::Scalar,
-                got: value,
-            }),
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum CompositeValue {
     Struct(StructValue),
     Enum(EnumValue),
@@ -197,56 +133,32 @@ impl From<EnumValue> for CompositeValue {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+impl TryFrom<Value> for CompositeValue {
+    type Error = TypeError;
+    
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Composite(value) => Ok(value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Composite,
+                got: value,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StructValue {
     ttype_id: TTypeId,
     fields: BTreeMap<Ident, Value>,
 }
 
 impl StructValue {
-    pub fn new(registry: &Registry, ttype_id: TTypeId, fields: BTreeMap<Ident, Value>) -> Result<StructValue, TypeError> {
-        let ttype = registry.ttype(&ttype_id)
-            .ok_or_else(|| TypeError::TypeNotFound(ttype_id.clone()))?;
-
-        let TType::Composite(CompositeType::Struct(ttype)) = ttype else {
-            return Err(TypeError::TypeInvalid {
-                expected: StructType::new(btreemap! {}).into(),
-                got: ttype
-            });
-        };
-
-        let mut new_fields = btreemap! {};
-
-        // check all fields exist in type
-        for (field_name, field_value) in &fields {
-            // field exists
-            if let Some(field_ttype_id) = ttype.fields().get(field_name) {
-                if *field_ttype_id != field_value.ttype_id() {
-                    return Err(TypeError::ValueTypeIdInvalid {
-                        expected: field_ttype_id.clone(),
-                        got: field_value.clone(),
-                    });
-                }
-
-                new_fields.insert(field_name.clone(), field_value);
-            } else {
-                return Err(TypeError::UnknownField(field_name.clone()));
-            }
-        }
-
-        // check literal has all fields
-        for name in fields.keys() {
-            if !fields.contains_key(name) {
-                return Err(TypeError::MissingField(name.clone()));
-            }
-        }
-
-        let value = StructValue {
+    pub unsafe fn new_unchecked(ttype_id: TTypeId, fields: BTreeMap<Ident, Value>) -> StructValue {
+        StructValue {
             ttype_id,
             fields,
-        };
-
-        Ok(value)
+        }
     }
 
     pub fn fields(&self) -> &BTreeMap<Ident, Value> {
@@ -275,12 +187,8 @@ impl StructValue {
 
         let ttype = registry.ttype(&self.ttype_id)
             .ok_or_else(|| TypeError::TypeNotFound(self.ttype_id.clone()))?;
-        let TType::Composite(CompositeType::Struct(struct_type)) = ttype else {
-            return Err(TypeError::TypeInvalid {
-                expected: StructType::new(btreemap! {}).into(),
-                got: ttype,
-            })
-        };
+
+        let struct_type: StructType = ttype.try_into()?;
         
         let selection_type = struct_type.select(registry, ident_forest)?;
         
@@ -301,17 +209,63 @@ impl StructValue {
 
 impl Debug for StructValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut d = f.debug_struct(&format!("{:?}", self.ttype_id));
-        
-        for (name, value) in &self.fields {
-            d.field(name, value);
-        }
-        
-        d.finish()
+        debug_db_struct(f, &self.ttype_id, self.fields.iter())
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+impl PartialOrd for StructValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.ttype_id != other.ttype_id || self.fields.len() != other.fields.len() {
+            return None;
+        }
+        for ((left_ident, left_value), (right_ident, right_value)) in self.fields.iter().zip(other.fields.iter()) {
+            debug_assert_eq!(left_ident, right_ident);
+            
+            let order = left_value.cmp(right_value);
+
+            let Ordering::Equal = order else {
+                return Some(order)
+            };
+        }
+        Some(Ordering::Equal)
+    }
+}
+
+impl Ord for StructValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).expect(&format!("failed to compare values, {:?}, {:?}, types not equal", self, other))
+    }
+}
+
+impl TryFrom<Value> for StructValue {
+    type Error = TypeError;
+    
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Composite(CompositeValue::Struct(value)) => Ok(value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Struct,
+                got: value,
+            }),
+        }
+    }
+}
+
+impl TryFrom<CompositeValue> for StructValue {
+    type Error = TypeError;
+    
+    fn try_from(value: CompositeValue) -> Result<Self, Self::Error> {
+        match value {
+            CompositeValue::Struct(value) => Ok(value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Struct,
+                got: value.into(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnumValue {
     ttype_id: TTypeId,
     tag: Ident,
@@ -319,34 +273,11 @@ pub struct EnumValue {
 }
 
 impl EnumValue {
-    pub fn new(registry: &Registry, ttype_id: TTypeId, tag: Ident, value: Value) -> Result<EnumValue, TypeError> {
-        let ttype = registry.ttype(&ttype_id)
-            .ok_or_else(|| TypeError::TypeNotFound(ttype_id.clone()))?;
-
-        let TType::Composite(CompositeType::Enum(ttype)) = ttype else {
-            return Err(TypeError::TypeInvalid {
-                expected: EnumType::new(btreemap! {}).into(),
-                got: ttype,
-            })
-        };
-
-        let tag_name = tag.clone();
-        
-        if let Some(tag_ttype_id) = ttype.tags().get(&tag_name) {
-            if *tag_ttype_id != value.ttype_id() {
-                return Err(TypeError::ValueTypeIdInvalid {
-                    expected: tag_ttype_id.clone(),
-                    got: value,
-                });
-            }
-
-            Ok(EnumValue {
-                ttype_id,
-                tag: tag_name,
-                value: Box::new(value),
-            })
-        } else {
-            Err(TypeError::UnknownTag(tag_name))
+    pub unsafe fn new_unchecked(ttype_id: TTypeId, tag: Ident, value: Value) -> EnumValue {
+        EnumValue {
+            ttype_id,
+            tag,
+            value: Box::new(value),
         }
     }
 
@@ -428,9 +359,56 @@ impl EnumValue {
 
 impl Debug for EnumValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple(&format!("{:?}::{:?}", self.ttype_id, self.tag))
-            .field(&self.value)
-            .finish()
+        debug_db_enum(f, &self.ttype_id, &self.tag, &self.value)
+    }
+}
+
+impl TryFrom<Value> for EnumValue {
+    type Error = TypeError;
+    
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Composite(CompositeValue::Enum(value)) => Ok(value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Enum,
+                got: value,
+            }),
+        }
+    }
+}
+
+impl TryFrom<CompositeValue> for EnumValue {
+    type Error = TypeError;
+    
+    fn try_from(value: CompositeValue) -> Result<Self, Self::Error> {
+        match value {
+            CompositeValue::Enum(value) => Ok(value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Enum,
+                got: value.into(),
+            }),
+        }
+    }
+}
+
+impl PartialOrd for EnumValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.ttype_id != other.ttype_id {
+            return None;
+        }
+
+        let order = self.tag.cmp(&other.tag);
+        let Ordering::Equal = order else {
+            return Some(order);
+        };
+
+        Some(self.value.cmp(&other.value))
+    }
+}
+
+impl Ord for EnumValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).expect(&format!("failed to compare values, {:?}, {:?}, types not equal", self, other))
     }
 }
 
@@ -484,49 +462,32 @@ impl Display for ScalarValue {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+impl TryFrom<Value> for ScalarValue {
+    type Error = TypeError;
+    
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Scalar(value) => Ok(value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Scalar,
+                got: value,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArrayValue {
-    inner_ttype_id: TTypeId,
+    ttype_id: TTypeId,
     entries: Vec<Value>,
 }
 
 impl ArrayValue {
-    pub fn new(registry: &Registry, array_ttype_id: TTypeId, entries: Vec<Value>) -> Result<ArrayValue, TypeError> {
-        let ttype = registry.ttype(&array_ttype_id)
-            .ok_or_else(|| TypeError::TypeNotFound(array_ttype_id.clone()))?;
-
-        let TType::Array(ttype) = ttype else {
-            return Err(TypeError::TypeInvalid {
-                // todo: proper error handling
-                expected: ArrayType::new(TTypeId::NEVER, None).into(),
-                got: ttype,
-            });
-        };
-
-        // check length
-        if let Some(length) = ttype.length() {
-            if entries.len() as u64 != *length {
-                return Err(TypeError::ArrayLen {
-                    expected: *length,
-                    got: entries.len() as u64,
-                });
-            }
-        }
-
-        // check all values are of correct type
-        for entry in &entries {
-            if entry.ttype_id() != *ttype.inner_ttype_id() {
-                return Err(TypeError::TypeIdInvalid {
-                    expected: ttype.inner_ttype_id().clone(),
-                    got: entry.ttype_id(),
-                });
-            }
-        }
-
-        Ok(ArrayValue {
-            inner_ttype_id: array_ttype_id,
+    pub unsafe fn new_unchecked(array_ttype_id: TTypeId, entries: Vec<Value>) -> ArrayValue {
+        ArrayValue {
+            ttype_id: array_ttype_id,
             entries,
-        })
+        }
     }
 
     pub fn entries(&self) -> &[Value] {
@@ -534,12 +495,12 @@ impl ArrayValue {
     }
 
     pub fn ttype_id(&self) -> TTypeId {
-        self.inner_ttype_id.clone()
+        self.ttype_id.clone()
     }
 
     pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<ArrayValue, TypeError> {
-        let array_ttype = registry.ttype(&self.inner_ttype_id)
-            .ok_or_else(|| TypeError::TypeNotFound(self.inner_ttype_id.clone()))?;
+        let array_ttype = registry.ttype(&self.ttype_id)
+            .ok_or_else(|| TypeError::TypeNotFound(self.ttype_id.clone()))?;
 
         let TType::Array(array_ttype) = array_ttype else {
             return Err(TypeError::TypeInvalid {
@@ -549,7 +510,7 @@ impl ArrayValue {
         };
 
         let inner_ttype = registry.ttype(array_ttype.inner_ttype_id())
-            .ok_or_else(|| TypeError::TypeNotFound(self.inner_ttype_id.clone()))?;
+            .ok_or_else(|| TypeError::TypeNotFound(self.ttype_id.clone()))?;
 
         let selection_type = inner_ttype.select(registry, ident_forest)?;
 
@@ -560,7 +521,7 @@ impl ArrayValue {
         }
 
         Ok(ArrayValue {
-            inner_ttype_id: TTypeId::new_anonymous(selection_type),
+            ttype_id: TTypeId::new_anonymous(selection_type),
             entries: new_entries,
         })
     }
@@ -568,14 +529,35 @@ impl ArrayValue {
 
 impl Debug for ArrayValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({:?})", self.inner_ttype_id)?;
+        debug_db_array(f, &self.ttype_id, self.entries.iter())
+    }
+}
 
-        let mut list = f.debug_list();
-        
-        for value in &self.entries {
-            list.entry(value);
+impl TryFrom<Value> for ArrayValue {
+    type Error = TypeError;
+    
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Array(value) => Ok(value),
+            value => Err(TypeError::ValueTypeSetInvalid {
+                expected: TypeSet::Array,
+                got: value,
+            }),
         }
-        
-        list.finish()
+    }
+}
+
+impl PartialOrd for ArrayValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.ttype_id != other.ttype_id {
+            return None;
+        }
+        Some(self.entries.cmp(&other.entries))
+    }
+}
+
+impl Ord for ArrayValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).expect(&format!("failed to compare values, {:?}, {:?}, types not equal", self, other))
     }
 }

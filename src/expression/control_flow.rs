@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::BTreeMap, fmt::Debug};
 
 use codb_core::Ident;
 
-use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, typesystem::{scope::{ScopeTypes, ScopeValues}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{CompositeValue, StructValue, Value}, TypeError}};
+use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, typesystem::{scope::{ScopeTypes, ScopeValues}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{EnumValue, StructValue, Value}, TypeError}};
 
 use super::{EvalError, Expression};
 
@@ -68,8 +68,6 @@ impl IfControlFlow {
 
     pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
         let cond_value = self.condition.eval(registry, relations, scopes)?;
-                
-        cond_value.ttype_id().must_eq(&TTypeId::BOOL)?;
 
         if cond_value == Value::TRUE {
             self.then.eval(registry, relations, scopes)
@@ -114,7 +112,7 @@ impl MatchControlFlow {
 
         let TType::Composite(CompositeType::Enum(param_type)) = param_type else {
             return Err(TypeError::TypeInvalid {
-                expected: EnumType::new(btreemap! {}).into(),
+                expected: EnumType::new(indexmap! {}).into(),
                 got: param_type,
             });
         };
@@ -135,7 +133,7 @@ impl MatchControlFlow {
             return Ok(ScalarType::Never.into());
         };
         
-        let new_scope = StructType::new(btreemap! {
+        let new_scope = StructType::new(indexmap! {
             first_branch.ident.clone() => param_type.tags()[first_pattern_tag].clone(),
         });
 
@@ -144,7 +142,7 @@ impl MatchControlFlow {
 
         // all branches return same type
         for (tag, branch) in &self.branches {
-            let new_scope = StructType::new(btreemap! {
+            let new_scope = StructType::new(indexmap! {
                 branch.ident.clone() => param_type.tags()[tag].clone(),
             });
 
@@ -160,39 +158,24 @@ impl MatchControlFlow {
     }
 
     pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        let scope_types = scopes.types()?;
+        let scope_types = scopes.types();
         
-        let param_type = self.param.eval_types(registry, relations, &scope_types)?;
-        let param_type = registry.ttype(&param_type)
-            .ok_or_else(|| TypeError::from(TypeError::TypeNotFound(param_type.clone())))?;
-        let TType::Composite(CompositeType::Enum(param_type)) = param_type else {
-            return Err(TypeError::TypeInvalid {
-                expected: EnumType::new(btreemap! {}).into(),
-                got: param_type,
-            }.into());
-        };
+        let param_type = self.param.eval_types(registry, relations, &scope_types).expect("failed to evaluate match parameter type");
+        let param_type = registry.ttype(&param_type).expect("match parameter type not found");
+        let param_type: EnumType = param_type.try_into().expect("match parameter type is not an enum");
+        
+        let param_value: EnumValue = self.param.eval(registry, relations, scopes)?.try_into().expect("match paramter value is not an enum value");
 
-        let param_value = self.param.eval(registry, relations, scopes)?;
+        let branch = self.branches.get(param_value.tag()).expect("branch not found");
 
-        let param_value = match param_value {
-            Value::Composite(CompositeValue::Enum(param_value)) => param_value,
-            param_value => return Err(TypeError::ValueTypeInvalid {
-                expected: EnumType::new(btreemap! {}).into(),
-                got: param_value,
-            }.into()),
-        };
-
-        let Some(branch) = self.branches.get(param_value.tag()) else {
-            return Err(TypeError::UnknownTag(param_value.tag().clone()).into());
-        };
-
-        let scope_type = TTypeId::new_anonymous(StructType::new(btreemap! {
+        let scope_type = TTypeId::new_anonymous(StructType::new(indexmap! {
             branch.ident.clone() => param_type.tags()[param_value.tag()].clone(),
         }).into());
         
-        let new_scope = StructValue::new(registry, scope_type, btreemap! {
+        // SAFETY: eval_types should have already checked that this value is valid
+        let new_scope = unsafe { StructValue::new_unchecked(scope_type, btreemap! {
             branch.ident.clone() => param_value.into_inner_value(),
-        })?;
+        }) };
 
         let mut new_scopes = scopes.clone();
         new_scopes.push(Cow::Owned(new_scope));
@@ -224,7 +207,7 @@ impl Debug for Branch {
 
 #[cfg(test)]
 mod tests {
-    use crate::{db::relation::memory::MemoryRelation, typesystem::value::{EnumValue, ScalarValue}};
+    use crate::{db::relation::memory::MemoryRelation, expression::{EnumLiteral, Literal}, typesystem::value::ScalarValue};
 
     use super::*;
 
@@ -236,15 +219,15 @@ mod tests {
         let result_ttype_id = TTypeId::from(id_path!("Result"));
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
-            param: Expression::Value(EnumValue::new(
-                &registry, result_ttype_id.clone(),
+            param: Expression::Literal(EnumLiteral::new(
+                result_ttype_id.clone(),
                 id!("Ok"),
-                ScalarValue::Unit.into()
-            ).unwrap().into()),
+                Expression::Literal(Literal::UNIT)
+            ).into()),
             ret_type: TTypeId::INT32,
             branches: btreemap! {
-                id!("Ok") => Branch::new(id!("_"), Expression::Value(ScalarValue::Int32(10).into())),
-                id!("Err") => Branch::new(id!("_"), Expression::Value(ScalarValue::Int32(8).into())),
+                id!("Ok") => Branch::new(id!("_"), Expression::Literal(ScalarValue::Int32(10).into())),
+                id!("Err") => Branch::new(id!("_"), Expression::Literal(ScalarValue::Int32(8).into())),
             },
         })));
 
@@ -253,10 +236,10 @@ mod tests {
 
         let expr = Expression::ControlFlow(Box::new(
             ControlFlow::Match(MatchControlFlow {
-                param: Expression::Value(EnumValue::new(&registry, result_ttype_id, id!("Ok"), ScalarValue::Unit.into()).unwrap().into()),
+                param: Expression::Literal(EnumLiteral::new(result_ttype_id, id!("Ok"), Expression::Literal(Literal::UNIT)).into()),
                 ret_type: TTypeId::INT32,
                 branches: btreemap! {
-                    id!("Ok") => Branch::new(id!("_"), Expression::Value(ScalarValue::Int32(10).into())),
+                    id!("Ok") => Branch::new(id!("_"), Expression::Literal(ScalarValue::Int32(10).into())),
                 },
             })
         ));
@@ -264,17 +247,16 @@ mod tests {
         assert_eq!(TypeError::MissingTag(id!("Err")), expr.eval_types(&registry, &relations, &ScopeTypes::EMPTY).unwrap_err());
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
-            param: Expression::Value(
-                EnumValue::new(
-                    &registry,
+            param: Expression::Literal(
+                EnumLiteral::new(
                     id_path!("Result").into(),
                     id!("Err"),
-                    ScalarValue::String("my_error".into()).into(),
-                ).unwrap().into()
+                    Expression::Literal(ScalarValue::String("my_error".into()).into()),
+                ).into()
             ),
             ret_type: TTypeId::STRING,
             branches: btreemap! {
-                id!("Ok") => Branch::new(id!("_"), Expression::Value(ScalarValue::String("Ok".into()).into())),
+                id!("Ok") => Branch::new(id!("_"), Expression::Literal(ScalarValue::String("Ok".into()).into())),
                 id!("Err") => Branch::new(id!("error"), Expression::NestedIdent(id!("error").into())),
             },
         })));

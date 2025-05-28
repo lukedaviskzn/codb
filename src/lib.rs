@@ -8,4 +8,7 @@ mod error;
 extern crate maplit;
 
 #[macro_use]
+extern crate indexmap;
+
+#[macro_use]
 extern crate codb_macro;

@@ -9,6 +9,13 @@ pub struct IdentTree {
 }
 
 impl IdentTree {
+    pub fn new(ident: Ident, children: IdentForest) -> IdentTree {
+        IdentTree {
+            ident,
+            children,
+        }
+    }
+
     pub fn ident(&self) -> &Ident {
         &self.ident
     }

@@ -17,7 +17,7 @@ impl Function {
     pub fn new<T: Into<FunctionArg>, R: Relation>(registry: &Registry, relations: &DbRelations<R>, args: impl IntoIterator<Item = T>, result_type_id: TTypeId, expression: Expression) -> Result<Function, TypeError> {
         let args: Box<[FunctionArg]> = args.into_iter().map(|arg| arg.into()).collect();
 
-        let mut scope_types = btreemap! {};
+        let mut scope_types = indexmap! {};
 
         for arg in &args {
             scope_types.insert(arg.name.clone(), arg.ttype_id().clone());
@@ -47,13 +47,10 @@ impl Function {
     pub fn invoke<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, args: impl Into<Box<[Value]>>) -> Result<Value, EvalError> {
         let args = args.into();
         if args.len() != self.args.len() {
-            return Err(TypeError::FunctionArgLen {
-                expected: self.args.len(),
-                got: args.len(),
-            }.into());
+            panic!("attempted to invoke function with wrong number of arguments, got {}, expected {}", args.len(), self.args.len());
         }
 
-        let mut arg_types = btreemap! {};
+        let mut arg_types = indexmap! {};
         let mut arg_values = btreemap! {};
 
         for (arg, value) in self.args.iter().zip(args) {
@@ -62,11 +59,11 @@ impl Function {
         }
 
         let arg_types = StructType::new(arg_types);
-        let arg_values = StructValue::new(
-            registry,
+        // SAFETY: eval_types should have already checked that this is valid
+        let arg_values = unsafe { StructValue::new_unchecked(
             TTypeId::new_anonymous(arg_types.clone().into()),
             arg_values,
-        )?;
+        ) };
 
         let arg_values = ScopeValues::one(Cow::Owned(arg_values));
 
@@ -90,7 +87,7 @@ impl Debug for Function {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FunctionArg {
     name: Ident,
     ttype_id: TTypeId,

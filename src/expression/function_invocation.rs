@@ -51,8 +51,7 @@ impl FunctionInvocation {
     }
 
     pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        let function = registry.function(&self.function).ok_or_else(
-            || TypeError::FunctionNotFound(self.function.clone()))?;
+        let function = registry.function(&self.function).expect("function not found");
         let mut args = Vec::new();
 
         for arg in &self.args {
@@ -75,7 +74,7 @@ impl Debug for FunctionInvocation {
 
 #[cfg(test)]
 mod tests {
-    use crate::{db::{registry::Registry, relation::memory::MemoryRelation, DbRelations}, expression::{EvalError, Expression}, typesystem::value::{EnumValue, ScalarValue, Value}};
+    use crate::{db::{registry::Registry, relation::memory::MemoryRelation, DbRelations}, expression::{EnumLiteral, EvalError, Expression, Literal}, typesystem::value::ScalarValue};
 
     use super::*;
 
@@ -87,13 +86,12 @@ mod tests {
         let expr_panic = Expression::FunctionInvocation(FunctionInvocation {
             function: id_path!("unwrap"),
             args: [
-                Expression::Value(
-                    EnumValue::new(
-                        &registry,
+                Expression::Literal(
+                    EnumLiteral::new(
                         id_path!("Result").into(),
                         id!("Err"),
-                        ScalarValue::String("my_error".into()).into(),
-                    ).unwrap().into()
+                        Expression::Literal(ScalarValue::String("my_error".into()).into()),
+                    ).into()
                 ),
             ].into(),
         });
@@ -101,22 +99,19 @@ mod tests {
         expr_panic.eval_types(&registry, &relations, &Default::default()).unwrap();
         let panic_err = expr_panic.eval(&registry, &relations, &Default::default()).unwrap_err();
 
-        let EvalError::UserPanic(panic_message) = panic_err else {
-            panic!();
-        };
+        let EvalError::UserPanic(panic_message) = panic_err;
 
         assert_eq!("my_error", panic_message);
 
         let expr_pass = Expression::FunctionInvocation(FunctionInvocation {
             function: id_path!("unwrap"),
             args: [
-                Expression::Value(
-                    EnumValue::new(
-                        &registry,
+                Expression::Literal(
+                    EnumLiteral::new(
                         id_path!("Result").into(),
                         id!("Ok"),
-                        ScalarValue::Unit.into(),
-                    ).unwrap().into()
+                        Expression::Literal(Literal::UNIT),
+                    ).into()
                 ),
             ].into(),
         });

@@ -129,7 +129,7 @@ impl<'a> ScopeValues<'a> {
         Ok(value)
     }
 
-    pub fn types(&self) -> Result<ScopeTypes, TypeError> {
+    pub fn types(&self) -> ScopeTypes {
         let mut scopes = Vec::new();
 
         for scope in &self.scopes {
@@ -144,8 +144,8 @@ impl<'a> ScopeValues<'a> {
             scopes.push(Cow::Owned(ttype));
         }
 
-        Ok(ScopeTypes {
+        ScopeTypes {
             scopes,
-        })
+        }
     }
 }

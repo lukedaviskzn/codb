@@ -11,7 +11,7 @@ pub mod value;
 pub mod function;
 pub mod scope;
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TypeError {
     #[error("unknown relation '{0}'")]
     UnknownRelation(Ident),
@@ -81,7 +81,7 @@ pub enum TypeError {
     FunctionNotFound(IdentPath),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeSet {
     Scalar,
     Composite,

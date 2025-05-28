@@ -4,7 +4,7 @@ use codb_core::IdentForest;
 use itertools::Itertools;
 use ron::ser::PrettyConfig;
 
-use crate::{db::registry::Registry, typesystem::TypeError};
+use crate::db::registry::Registry;
 
 use super::{memory::MemoryRelation, Key, Relation, RelationRef, Row, RowSize, Schema};
 
@@ -59,34 +59,34 @@ impl RelationRef for FileRelation {
         &self.schema
     }
 
-    fn range(&self, registry: &Registry, ident_forest: &IdentForest, range: impl RangeBounds<Key>) -> Result<impl Iterator<Item = Row>, TypeError> {
+    fn range(&self, registry: &Registry, ident_forest: &IdentForest, range: impl RangeBounds<Key>) -> impl Iterator<Item = Row> {
         let relation = read_mem_relation(&self.filepath).expect("failed to read from file");
 
-        let rows = relation.range(registry, ident_forest, range)?.collect_vec();
+        let rows = relation.range(registry, ident_forest, range).collect_vec();
 
-        Ok(rows.into_iter())
+        rows.into_iter()
     }
 }
 
 impl Relation for FileRelation {
-    fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<bool, TypeError> {
+    fn insert(&mut self, registry: &Registry, new_row: Row) -> bool {
         let mut relation = read_mem_relation(&self.filepath).expect("failed to read from file");
 
-        let inserted = relation.insert(registry, new_row)?;
+        let inserted = relation.insert(registry, new_row);
 
         write_mem_relation(&self.filepath, &relation).expect("failed to write to file");
 
-        Ok(inserted)
+        inserted
     }
 
-    fn remove(&mut self, registry: &Registry, pkey: &super::Key) -> Result<Option<Row>, TypeError> {
+    fn remove(&mut self, registry: &Registry, pkey: &super::Key) -> Option<Row> {
         let mut relation = read_mem_relation(&self.filepath).expect("failed to read from file");
 
-        let old_row = relation.remove(registry, pkey)?;
+        let old_row = relation.remove(registry, pkey);
 
         write_mem_relation(&self.filepath, &relation).expect("failed to write to file");
 
-        Ok(old_row)
+        old_row
     }
 
     fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> RowSize {
@@ -110,17 +110,19 @@ mod tests {
 
     #[test]
     fn file_relation() {
-        fn new_user(registry: &Registry, user_ttype_id: &TTypeId, id: i32, active: bool) -> StructValue {
-            StructValue::new(registry, user_ttype_id.clone(), btreemap! {
+        fn new_user(user_ttype_id: &TTypeId, id: i32, active: bool) -> StructValue {
+            // SAFETY: test case
+            unsafe { StructValue::new_unchecked(user_ttype_id.clone(), btreemap! {
                 id!("id") => ScalarValue::Int32(id).into(),
                 id!("active") => ScalarValue::Bool(active).into(),
-            }).unwrap()
+            }) }
         }
 
-        fn new_id(registry: &Registry, user_id_ttype_id: &TTypeId, id: i32) -> StructValue {
-            StructValue::new(registry, user_id_ttype_id.clone(), btreemap! {
+        fn new_id(user_id_ttype_id: &TTypeId, id: i32) -> StructValue {
+            // SAFETY: test case
+            unsafe { StructValue::new_unchecked(user_id_ttype_id.clone(), btreemap! {
                 id!("id") => ScalarValue::Int32(id).into(),
-            }).unwrap()
+            }) }
         }
 
         let registry = Registry::new(&DbRelations::<FileRelation>::new());
@@ -144,7 +146,7 @@ mod tests {
         //     ).unwrap()))),
         // })));
 
-        let user_struct = StructType::new(btreemap! {
+        let user_struct = StructType::new(indexmap! {
             id!("id") => TTypeId::INT32,
             id!("active") => TTypeId::BOOL,
         });
@@ -167,47 +169,47 @@ mod tests {
         let mut users = FileRelation::new(user_schema.clone(), USERS_PATH).unwrap();
         let mut inactive_users = FileRelation::new(user_schema.clone(), INACTIVE_USERS_PATH).unwrap();
 
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 1, true)).unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 2, true)).unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 3, false)).unwrap();
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 4, true)).unwrap();
+        users.insert(&registry, new_user(&user_ttype_id, 0, false));
+        users.insert(&registry, new_user(&user_ttype_id, 1, true));
+        users.insert(&registry, new_user(&user_ttype_id, 2, true));
+        users.insert(&registry, new_user(&user_ttype_id, 3, false));
+        users.insert(&registry, new_user(&user_ttype_id, 4, true));
 
         let empty_forest = IdentForest::empty();
 
-        let new_rows = users.range(&registry, &empty_forest, ..).unwrap()
+        let new_rows = users.range(&registry, &empty_forest, ..)
             .filter_map(|row| {
                 row.fields().get("active")
                     .filter(|value| **value == Value::FALSE)
                     .map(|_| row.clone())
             });
         
-        inactive_users.extend(&registry, new_rows).unwrap();
+        inactive_users.extend(&registry, new_rows);
 
         let mut inactive_users_expected = MemoryRelation::new(user_schema.clone());
 
-        let user_3 = new_user(&registry, &user_ttype_id, 3, false);
+        let user_3 = new_user(&user_ttype_id, 3, false);
 
-        inactive_users_expected.insert(&registry, new_user(&registry, &user_ttype_id, 0, false)).unwrap();
-        inactive_users_expected.insert(&registry, user_3.clone()).unwrap();
+        inactive_users_expected.insert(&registry, new_user(&user_ttype_id, 0, false));
+        inactive_users_expected.insert(&registry, user_3.clone());
 
         assert!(RelationRef::eq(&inactive_users_expected, &registry, &inactive_users));
         
         // cannot insert again
-        assert_eq!(false, inactive_users.insert(&registry, user_3).unwrap());
+        assert_eq!(false, inactive_users.insert(&registry, user_3));
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &user_ttype_id, []).unwrap())).unwrap_err();
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &user_ttype_id, [FieldValue::new("id", Value::Scalar(ScalarValueInner::Int32(2)))]).unwrap())).unwrap_err();
 
         // check range
-        let users_range = users.range(&registry, users.schema.pkey(), new_id(&registry, &user_id_ttype_id, 1)..new_id(&registry, &user_id_ttype_id, 3)).unwrap().enumerate().collect_vec();
+        let users_range = users.range(&registry, users.schema.pkey(), new_id(&user_id_ttype_id, 1)..new_id(&user_id_ttype_id, 3)).enumerate().collect_vec();
 
         assert_eq!(2, users_range.len());
 
         for (i, user) in users_range {
-            assert_eq!(user, new_user(&registry, &user_ttype_id, i as i32 + 1, true));
+            assert_eq!(user, new_user(&user_ttype_id, i as i32 + 1, true));
         }
 
-        users.insert(&registry, new_user(&registry, &user_ttype_id, 499, true)).unwrap();
+        users.insert(&registry, new_user(&user_ttype_id, 499, true));
         // users.insert(&registry, new_user(&registry, &user_ttype_id, 500, true)).unwrap_err();
         // users.insert(&registry, new_user(&registry, &user_ttype_id, 501, true)).unwrap_err();
 

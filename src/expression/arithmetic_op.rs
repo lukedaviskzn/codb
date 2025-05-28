@@ -51,11 +51,12 @@ impl ArithmeticOp {
                 let left = left.eval(registry, relations, scopes)?;
                 let right = right.eval(registry, relations, scopes)?;
                 
-                left.ttype_id().must_eq(&TTypeId::INT32)?;
-                right.ttype_id().must_eq(&TTypeId::INT32)?;
-
-                let Value::Scalar(ScalarValue::Int32(left)) = left else { unreachable!() };
-                let Value::Scalar(ScalarValue::Int32(right)) = right else { unreachable!() };
+                let Value::Scalar(ScalarValue::Int32(left)) = left else {
+                    panic!("left value is not an int32")
+                };
+                let Value::Scalar(ScalarValue::Int32(right)) = right else {
+                    panic!("right value is not an int32")
+                };
 
                 (left, right)
             }

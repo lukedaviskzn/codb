@@ -14,6 +14,12 @@ impl IdentForest {
         }
     }
 
+    pub fn new(trees: impl Into<Box<[IdentTree]>>) -> IdentForest {
+        IdentForest {
+            trees: trees.into(),
+        }
+    }
+
     pub fn from_nested_idents(nested_idents: impl Into<Box<[NestedIdent]>>) -> IdentForest {
         let mut roots: Vec<&Ident> = vec![];
 

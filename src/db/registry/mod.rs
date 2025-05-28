@@ -5,11 +5,11 @@ use module::Module;
 
 mod module;
 
-use crate::{expression::{Branch, ControlFlow, Expression, InterpreterAction, MatchControlFlow}, typesystem::{function::{Function, FunctionArg}, ttype::{ArrayType, CompositeType, EnumType, ScalarType, TType}, value::Value, TypeError}};
+use crate::{expression::{Branch, ControlFlow, Expression, InterpreterAction, Literal, MatchControlFlow}, typesystem::{function::{Function, FunctionArg}, ttype::{ArrayType, CompositeType, EnumType, ScalarType, TType}, TypeError}};
 
 use super::{relation::Relation, DbRelations};
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TTypeId {
     Scalar(ScalarType),
     Composite(CompositeTTypeId),
@@ -17,6 +17,13 @@ pub enum TTypeId {
 }
 
 impl TTypeId {
+    pub const NEVER: TTypeId = TTypeId::Scalar(ScalarType::Never);
+    pub const UNIT: TTypeId = TTypeId::Scalar(ScalarType::Unit);
+    pub const BOOL: TTypeId = TTypeId::Scalar(ScalarType::Bool);
+    pub const INT32: TTypeId = TTypeId::Scalar(ScalarType::Int32);
+    pub const INT64: TTypeId = TTypeId::Scalar(ScalarType::Int64);
+    pub const STRING: TTypeId = TTypeId::Scalar(ScalarType::String);
+    
     pub fn new_anonymous(ttype: TType) -> TTypeId {
         match ttype {
             TType::Composite(composite_type) => TTypeId::Composite(CompositeTTypeId::Anonymous(Box::new(composite_type))),
@@ -56,15 +63,6 @@ impl TTypeId {
     }
 }
 
-impl TTypeId {
-    pub const NEVER: TTypeId = TTypeId::Scalar(ScalarType::Never);
-    pub const UNIT: TTypeId = TTypeId::Scalar(ScalarType::Unit);
-    pub const BOOL: TTypeId = TTypeId::Scalar(ScalarType::Bool);
-    pub const INT32: TTypeId = TTypeId::Scalar(ScalarType::Int32);
-    pub const INT64: TTypeId = TTypeId::Scalar(ScalarType::Int64);
-    pub const STRING: TTypeId = TTypeId::Scalar(ScalarType::String);
-}
-
 impl Debug for TTypeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -99,7 +97,7 @@ impl From<ArrayType> for TTypeId {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CompositeTTypeId {
     Path(IdentPath),
     Anonymous(Box<CompositeType>),
@@ -110,9 +108,9 @@ impl Debug for CompositeTTypeId {
         match self {
             Self::Path(path) => Debug::fmt(path, f),
             Self::Anonymous(ttype) => {
-                write!(f, "anon[")?;
+                write!(f, "anon{{")?;
                 Debug::fmt(ttype, f)?;
-                write!(f, "]")
+                write!(f, "}}")
             },
         }
     }
@@ -136,7 +134,7 @@ impl Registry {
 
         // Result<(), String>
         registry.root
-            .add(id!("Result"), EnumType::new(btreemap! {
+            .add(id!("Result"), EnumType::new(indexmap! {
                 id!("Ok") => TTypeId::UNIT,
                 id!("Err") => TTypeId::STRING,
             }))
@@ -153,7 +151,7 @@ impl Registry {
                     param: Expression::NestedIdent(id!("result").into()),
                     ret_type: TTypeId::UNIT,
                     branches: btreemap! {
-                        id!("Ok") => Branch::new(id!("_"), Expression::Value(Value::UNIT)),
+                        id!("Ok") => Branch::new(id!("_"), Expression::Literal(Literal::UNIT)),
                         id!("Err") => Branch::new(id!("error"), Expression::Action(
                             InterpreterAction::Panic { message: Box::new(Expression::NestedIdent(id!("error").into())) }
                         )),

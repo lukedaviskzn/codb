@@ -2,7 +2,7 @@ use std::ops::RangeBounds;
 
 use codb_core::IdentForest;
 
-use crate::{db::registry::{Registry, TTypeId}, typesystem::{ttype::StructType, value::StructValue, TypeError}};
+use crate::{db::registry::{Registry, TTypeId}, typesystem::{function::Function, ttype::StructType, value::StructValue, TypeError}};
 
 pub mod memory;
 pub mod file;
@@ -13,7 +13,7 @@ pub type RowSize = u64;
 
 pub trait RelationRef {
     fn schema(&self) -> &Schema;
-    fn range(&self, registry: &Registry, ident_forest: &IdentForest, range: impl RangeBounds<Key>) -> Result<impl Iterator<Item = Row>, TypeError>;
+    fn range(&self, registry: &Registry, ident_forest: &IdentForest, range: impl RangeBounds<Key>) -> impl Iterator<Item = Row>;
     
     #[cfg(test)]
     fn eq(&self, registry: &Registry, other: &impl RelationRef) -> bool {
@@ -25,7 +25,7 @@ pub trait RelationRef {
 
         let empty_forest = IdentForest::empty();
 
-        let zipped = self.range(registry, &empty_forest, ..).unwrap().zip_longest(other.range(registry, &empty_forest, ..).unwrap());
+        let zipped = self.range(registry, &empty_forest, ..).zip_longest(other.range(registry, &empty_forest, ..));
         
         for rows in zipped {
             match rows {
@@ -48,7 +48,7 @@ pub trait RelationRef {
 
         let empty_forest = IdentForest::empty();
 
-        for row in self.range(registry, &empty_forest, ..).unwrap() {
+        for row in self.range(registry, &empty_forest, ..) {
             out_string += &format!("{:?}\n", row);
         }
 
@@ -60,20 +60,20 @@ pub trait RelationRef {
 }
 
 pub trait Relation: RelationRef {
-    fn insert(&mut self, registry: &Registry, new_row: Row) -> Result<bool, TypeError>;
+    fn insert(&mut self, registry: &Registry, new_row: Row) -> bool;
     
     #[allow(unused)]
-    fn extend(&mut self, registry: &Registry, new_rows: impl IntoIterator<Item = Row>) -> Result<RowSize, TypeError> {
+    fn extend(&mut self, registry: &Registry, new_rows: impl IntoIterator<Item = Row>) -> RowSize {
         let mut count = 0;
         for new_row in new_rows {
-            if self.insert(registry, new_row)? {
+            if self.insert(registry, new_row) {
                 count += 1;
             }
         }
-        Ok(count)
+        count
     }
     
-    fn remove(&mut self, registry: &Registry, pkey: &Key) -> Result<Option<Row>, TypeError>;
+    fn remove(&mut self, registry: &Registry, pkey: &Key) -> Option<Row>;
     fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> RowSize;
 }
 

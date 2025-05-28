@@ -7,6 +7,7 @@ edition = "2024"
 codb-core = { version = "0.1.0", path = "codb-core" }
 codb-macro = { version = "0.1.0", path = "codb-macro" }
 either = "1.15.0"
+indexmap = { version = "2.9.0", features = ["serde"] }
 itertools = "0.14.0"
 maplit = "1.0.2"
 ron = "0.10.1"

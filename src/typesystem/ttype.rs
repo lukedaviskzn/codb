@@ -1,12 +1,13 @@
-use std::{collections::BTreeMap, fmt::Debug};
+use std::fmt::{Debug, Display};
 
 use codb_core::{Ident, IdentForest};
+use indexmap::IndexMap;
 
 use crate::db::{registry::{Registry, TTypeId}, relation::RowSize};
 
-use super::TypeError;
+use super::{TypeError, TypeSet};
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TType {
     Composite(CompositeType),
     Scalar(ScalarType),
@@ -84,7 +85,7 @@ impl From<ArrayType> for TType {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CompositeType {
     Struct(StructType),
     Enum(EnumType),
@@ -127,19 +128,33 @@ impl From<EnumType> for CompositeType {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+impl TryFrom<TType> for CompositeType {
+    type Error = TypeError;
+
+    fn try_from(value: TType) -> Result<Self, Self::Error> {
+        match value {
+            TType::Composite(ttype) => Ok(ttype),
+            ttype => Err(TypeError::TypeSetInvalid {
+                expected: TypeSet::Composite,
+                got: ttype,
+            })
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StructType {
-    fields: BTreeMap<Ident, TTypeId>,
+    fields: IndexMap<Ident, TTypeId>,
 }
 
 impl StructType {
-    pub fn new(fields: BTreeMap<Ident, TTypeId>) -> StructType {
+    pub fn new(fields: IndexMap<Ident, TTypeId>) -> StructType {
         StructType {
             fields: fields.into(),
         }
     }
 
-    pub fn fields(&self) -> &BTreeMap<Ident, TTypeId> {
+    pub fn fields(&self) -> &IndexMap<Ident, TTypeId> {
         &self.fields
     }
 
@@ -148,7 +163,7 @@ impl StructType {
             return Ok(self.clone());
         }
 
-        let mut new_fields = BTreeMap::new();
+        let mut new_fields = IndexMap::new();
         
         for tree in ident_forest {
             let ident = tree.ident().clone();
@@ -189,13 +204,41 @@ impl Debug for StructType {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+impl TryFrom<TType> for StructType {
+    type Error = TypeError;
+
+    fn try_from(value: TType) -> Result<Self, Self::Error> {
+        match value {
+            TType::Composite(CompositeType::Struct(ttype)) => Ok(ttype),
+            ttype => Err(TypeError::TypeSetInvalid {
+                expected: TypeSet::Struct,
+                got: ttype,
+            })
+        }
+    }
+}
+
+impl TryFrom<CompositeType> for StructType {
+    type Error = TypeError;
+
+    fn try_from(value: CompositeType) -> Result<Self, Self::Error> {
+        match value {
+            CompositeType::Struct(ttype) => Ok(ttype),
+            ttype => Err(TypeError::TypeSetInvalid {
+                expected: TypeSet::Struct,
+                got: ttype.into(),
+            })
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnumType {
-    tags: BTreeMap<Ident, TTypeId>,
+    tags: IndexMap<Ident, TTypeId>,
 }
 
 impl EnumType {
-    pub fn new(tags: BTreeMap<Ident, TTypeId>) -> EnumType {
+    pub fn new(tags: IndexMap<Ident, TTypeId>) -> EnumType {
         EnumType {
             tags,
         }
@@ -203,7 +246,7 @@ impl EnumType {
 
     pub fn new_option(ttype_id: TTypeId) -> EnumType {
         EnumType {
-            tags: btreemap! {
+            tags: indexmap! {
                 id!("Some") => ttype_id,
                 id!("None") => TTypeId::UNIT,
             }
@@ -212,14 +255,14 @@ impl EnumType {
 
     pub fn new_result(ok_ttype_id: TTypeId, err_ttype_id: TTypeId) -> EnumType {
         EnumType {
-            tags: btreemap! {
+            tags: indexmap! {
                 id!("Ok") => ok_ttype_id,
                 id!("Err") => err_ttype_id,
             }
         }
     }
 
-    pub fn tags(&self) -> &BTreeMap<Ident, TTypeId> {
+    pub fn tags(&self) -> &IndexMap<Ident, TTypeId> {
         &self.tags
     }
 
@@ -258,6 +301,34 @@ impl Debug for EnumType {
     }
 }
 
+impl TryFrom<TType> for EnumType {
+    type Error = TypeError;
+
+    fn try_from(value: TType) -> Result<Self, Self::Error> {
+        match value {
+            TType::Composite(CompositeType::Enum(ttype)) => Ok(ttype),
+            ttype => Err(TypeError::TypeSetInvalid {
+                expected: TypeSet::Enum,
+                got: ttype,
+            })
+        }
+    }
+}
+
+impl TryFrom<CompositeType> for EnumType {
+    type Error = TypeError;
+
+    fn try_from(value: CompositeType) -> Result<Self, Self::Error> {
+        match value {
+            CompositeType::Enum(ttype) => Ok(ttype),
+            ttype => Err(TypeError::TypeSetInvalid {
+                expected: TypeSet::Enum,
+                got: ttype.into(),
+            })
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ScalarType {
     Never,
@@ -277,8 +348,8 @@ impl ScalarType {
 
     pub fn name(&self) -> &str {
         match self {
-            ScalarType::Never => "!",
-            ScalarType::Unit => "()",
+            ScalarType::Never => "never",
+            ScalarType::Unit => "unit",
             ScalarType::Bool => "bool",
             ScalarType::Int32 => "int32",
             ScalarType::Int64 => "int64",
@@ -301,7 +372,27 @@ impl Debug for ScalarType {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+impl Display for ScalarType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
+}
+
+impl TryFrom<TType> for ScalarType {
+    type Error = TypeError;
+
+    fn try_from(value: TType) -> Result<Self, Self::Error> {
+        match value {
+            TType::Scalar(ttype) => Ok(ttype),
+            ttype => Err(TypeError::TypeSetInvalid {
+                expected: TypeSet::Scalar,
+                got: ttype,
+            })
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArrayType {
     inner_ttype_id: TTypeId,
     length: Option<RowSize>,
@@ -336,11 +427,25 @@ impl ArrayType {
 
 impl Debug for ArrayType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(self.inner_ttype_id(), f)?;
         if let Some(len) = self.length() {
-            write!(f, "[{len}]")
+            write!(f, "[{len}]")?;
         } else {
-            write!(f, "[]")
+            write!(f, "[]")?;
+        }
+        Debug::fmt(self.inner_ttype_id(), f)
+    }
+}
+
+impl TryFrom<TType> for ArrayType {
+    type Error = TypeError;
+
+    fn try_from(value: TType) -> Result<Self, Self::Error> {
+        match value {
+            TType::Array(ttype) => Ok(ttype),
+            ttype => Err(TypeError::TypeSetInvalid {
+                expected: TypeSet::Array,
+                got: ttype,
+            })
         }
     }
 }

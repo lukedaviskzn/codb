@@ -4,7 +4,7 @@ use codb_core::Ident;
 use registry::Registry;
 use relation::Relation;
 
-use crate::{expression::EvalError, query::Query, typesystem::{scope::{ScopeTypes, ScopeValues}, value::Value}};
+use crate::{query::{Query, QueryExecutionError}, typesystem::{scope::ScopeValues, value::Value}};
 
 pub mod registry;
 pub mod relation;
@@ -33,7 +33,7 @@ impl<R: Relation> Db<R> {
     }
 
     #[allow(unused)]
-    pub fn execute(&self, query: Query) -> Result<Value, EvalError> {
+    pub fn execute(&self, query: Query) -> Result<Value, QueryExecutionError> {
         let out = catch_unwind(|| {
             match query {
                 Query::Data(expression) => {
@@ -41,7 +41,6 @@ impl<R: Relation> Db<R> {
                     let db = self.inner.read().unwrap();
                     let registry = db.registry();
                     let relations = db.relations().read().unwrap();
-                    expression.eval_types(registry, &relations, &ScopeTypes::EMPTY)?;
                     expression.eval(registry, &relations, &ScopeValues::EMPTY)
                 },
             }
@@ -49,8 +48,8 @@ impl<R: Relation> Db<R> {
 
         match out {
             Ok(Ok(out)) => Ok(out),
-            Ok(Err(out)) => Err(out),
-            Err(err) => Err(EvalError::UnexpectedPanic(err)),
+            Ok(Err(err)) => Err(err.into()),
+            Err(err) => Err(QueryExecutionError::UnexpectedPanic(err)),
         }
     }
 }
@@ -107,33 +106,35 @@ impl<R: Relation> DbRelations<R> {
 
 #[cfg(test)]
 mod tests {
-    use core::panic;
     use std::ops::Bound;
 
     use codb_core::IdentForest;
     use itertools::Itertools;
 
-    use crate::{expression::{Expression, InterpreterAction}, typesystem::{ttype::{EnumType, StructType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue}}};
+    use crate::{expression::{Expression, InterpreterAction, Literal, StructLiteral}, typesystem::{ttype::{EnumType, StructType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue}}};
 
     use super::{registry::TTypeId, relation::{memory::MemoryRelation, RelationRef, Schema}, *};
 
-    fn db_initial_values(registry: &Registry, ttype: &StructType) -> [StructValue; 3] {
+    fn db_initial_values(ttype: &StructType) -> [StructValue; 3] {
         let mut rows = [
-            StructValue::new(registry, TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
+            // SAFETY: test case
+            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
                 id!("id") => Value::Scalar(ScalarValue::Int32(1).into()),
                 id!("name") => Value::Scalar(ScalarValue::String("Jim Jones".into()).into()),
                 id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
-            }).unwrap().into(),
-            StructValue::new(registry, TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
+            }) }.into(),
+            // SAFETY: test case
+            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
                 id!("id") => Value::Scalar(ScalarValue::Int32(2).into()),
                 id!("name") => Value::Scalar(ScalarValue::String("Jimboni Jonesi".into()).into()),
                 id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
-            }).unwrap().into(),
-            StructValue::new(registry, TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
+            }) }.into(),
+            // SAFETY: test case
+            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
                 id!("id") => Value::Scalar(ScalarValue::Int32(-1).into()),
                 id!("name") => Value::Scalar(ScalarValue::String("El Jones, Jim".into()).into()),
                 id!("active") => Value::Scalar(ScalarValue::Bool(false).into()),
-            }).unwrap().into(),
+            }) }.into(),
         ];
         rows.sort();
         rows
@@ -145,7 +146,7 @@ mod tests {
         {
             let db_inner = db.inner.read().unwrap();
             
-            let my_type = StructType::new(btreemap! {
+            let my_type = StructType::new(indexmap! {
                 id!("id") => TTypeId::INT32,
                 id!("name") => TTypeId::STRING,
                 id!("active") => TTypeId::BOOL,
@@ -159,7 +160,7 @@ mod tests {
                 Schema::new(registry, my_type.clone(), IdentForest::from_nested_idents([id!("id").into()])).unwrap()
             ));
 
-            relations.get("Rel").unwrap().write().unwrap().extend(&registry, db_initial_values(registry, &my_type)).unwrap();
+            relations.get("Rel").unwrap().write().unwrap().extend(&registry, db_initial_values(&my_type));
         }
 
         db
@@ -170,7 +171,7 @@ mod tests {
         let db = Db::<MemoryRelation>::new();
         let db = db.inner.read().unwrap();
         
-        let my_type = StructType::new(btreemap! {
+        let my_type = StructType::new(indexmap! {
             id!("id") => TTypeId::INT32,
             id!("name") => TTypeId::STRING,
             id!("active") => TTypeId::BOOL,
@@ -204,7 +205,7 @@ mod tests {
 
         let expected_deleted_row: Value;
         let relation_type_option;
-        let pkey_value: Value;
+        let pkey_value: Literal;
         {
             let db_inner = db.inner.read().unwrap();
             let registry = db_inner.registry();
@@ -212,26 +213,25 @@ mod tests {
             let relation = relations.get(&id!("Rel")).unwrap();
             let relation = relation.read().unwrap();
 
-            assert_eq!(entries, db_initial_values(registry, relation.schema().ttype()));
+            assert_eq!(entries, db_initial_values(relation.schema().ttype()));
 
             expected_deleted_row = entries.remove(0).into();
 
             let pkey_type = TTypeId::new_anonymous(relation.schema().pkey_ttype(registry).unwrap().into());
             
-            pkey_value = StructValue::new(
-                registry,
+            pkey_value = StructLiteral::new(
                 pkey_type,
                 btreemap! {
-                    id!("id") => Value::Scalar(ScalarValue::Int32(-1).into()),
+                    id!("id") => Expression::Literal(ScalarValue::Int32(-1).into()),
                 },
-            ).unwrap().into();
+            ).into();
 
             relation_type_option = EnumType::new_option(relation.schema().ttype_id());
         }
 
         let out = db.execute(Query::Data(Expression::Action(InterpreterAction::Remove {
             relation: id!("Rel"),
-            pkey: Box::new(Expression::Value(pkey_value.clone())),
+            pkey: Box::new(Expression::Literal(pkey_value.clone())),
         }))).unwrap();
 
         let out: EnumValue = out.try_into().unwrap();
@@ -241,7 +241,7 @@ mod tests {
 
         let out = db.execute(Query::Data(Expression::Action(InterpreterAction::Remove {
             relation: id!("Rel"),
-            pkey: Box::new(Expression::Value(pkey_value.clone())),
+            pkey: Box::new(Expression::Literal(pkey_value.clone())),
         }))).unwrap();
 
         let out: EnumValue = out.try_into().unwrap();
