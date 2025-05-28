@@ -2,12 +2,12 @@ use std::{collections::BTreeMap, fmt::Debug};
 
 use codb_core::Ident;
 
-use crate::{error::IdentTaken, typesystem::{function::Function, ttype::TType}};
+use crate::{error::IdentTaken, typesystem::{function::Function, ttype::CompositeType}};
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleItem {
     Module(Module),
-    TType(TType), // todo: only allow composite types
+    TType(CompositeType),
     Function(Function),
 }
 
@@ -23,7 +23,7 @@ impl From<Function> for ModuleItem {
     }
 }
 
-impl<T: Into<TType>> From<T> for ModuleItem {
+impl<T: Into<CompositeType>> From<T> for ModuleItem {
     fn from(value: T) -> Self {
         Self::TType(value.into())
     }
@@ -73,7 +73,7 @@ impl Module {
         }
     }
 
-    pub fn ttype(&self, ident: &Ident) -> Option<&TType> {
+    pub fn ttype(&self, ident: &Ident) -> Option<&CompositeType> {
         if let ModuleItem::TType(ttype) = self.items.get(ident)? {
             Some(ttype)
         } else {

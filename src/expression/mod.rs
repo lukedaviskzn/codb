@@ -51,7 +51,6 @@ impl Expression {
     pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
             Expression::NestedIdent(nested_ident) => scopes.get_nested(registry, nested_ident),
-            // todo: properly check literal types
             Expression::Literal(literal) => literal.eval_types(registry, relations, scopes),
             Expression::Op(op) => op.eval_types(registry, relations, scopes),
             Expression::ControlFlow(control_flow) => control_flow.eval_types(registry, relations, scopes),

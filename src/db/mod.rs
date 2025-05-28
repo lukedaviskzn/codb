@@ -37,8 +37,7 @@ impl<R: Relation> Db<R> {
         let out = catch_unwind(|| {
             match query {
                 Query::Data(expression) => {
-                    // todo: fix unwrap
-                    let db = self.inner.read().unwrap();
+                    let db = self.inner.read().expect("failed to acquire read lock on db inner");
                     let registry = db.registry();
                     let relations = db.relations().read().unwrap();
                     expression.eval(registry, &relations, &ScopeValues::EMPTY)
