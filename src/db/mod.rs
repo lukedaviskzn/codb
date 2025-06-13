@@ -213,7 +213,7 @@ mod tests {
     use codb_core::{IdentForest, IdentTree};
     use itertools::Itertools;
 
-    use crate::{db::{registry::TTypeId, relation::{Relation, Schema}, Db}, expression::{Expression, InterpreterAction, Literal, StructLiteral}, query::{lexer::Lexer, parser::Parser, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery, Query}, typesystem::{ttype::{CompositeType, EnumType, StructType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue, Value}}};
+    use crate::{db::{registry::TTypeId, relation::{Relation, Schema}, Db}, expression::{Expression, InterpreterAction, Literal, StructLiteral}, query::{lexer::LexerInner, parser::Parser, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery, Query}, typesystem::{ttype::{CompositeType, EnumType, StructType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue, Value}}};
 
     use super::{pager::Pager, relation::memory::PagerRelation};
 
@@ -358,7 +358,7 @@ mod tests {
     fn data_query() {
         let db = create_db();
 
-        let lexer = Lexer::new("
+        let lexer = LexerInner::new("
             #Rel.range<id>(
                 /* 0-1 instead of just -1 since negation operator isn't finished */
                 struct { id: int32 } { id: - 0i32 10i32 },
@@ -398,7 +398,7 @@ mod tests {
             relation_type_option = EnumType::new_option(relation.schema().ttype_id());
         }
 
-        let lexer = Lexer::new("
+        let lexer = LexerInner::new("
             #Rel.remove(
                 // 0-1 instead of just -1 since negation operator isn't finished
                 struct { id: int32 } { id: - 0i32 1i32 }

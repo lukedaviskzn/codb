@@ -1,8 +1,8 @@
-use std::{fmt::{Debug, Display}, iter::{Enumerate, Peekable}, num::ParseIntError};
+use std::{fmt::{Debug, Display}, iter::{Enumerate, Peekable}, num::ParseIntError, ops::{Deref, DerefMut}};
 
 use codb_core::Ident;
 
-use crate::typesystem::{ttype::ScalarType, value::ScalarValue};
+use crate::{query::parser::{ParseError, ParseErrorKind}, typesystem::{ttype::ScalarType, value::ScalarValue}};
 
 use super::Span;
 
@@ -231,17 +231,148 @@ impl Debug for Symbol {
 }
 
 pub(crate) struct Lexer<T: Iterator<Item = char>> {
-    chars: Peekable<Enumerate<T>>,
+    inner: Peekable<LexerInner<T>>,
 }
 
 impl<T: Iterator<Item = char>> Lexer<T> {
     pub fn new(chars: T) -> Self {
         Self {
+            inner: LexerInner::new(chars).peekable(),
+        }
+    }
+
+    pub fn expect_peek(&mut self) -> Result<&Token, ParseError> {
+        let token = self.peek().ok_or_else(|| ParseError {
+            span: Span::ALL,
+            context: None,
+            kind: ParseErrorKind::UnexpectedEnd,
+        })?.as_ref().map_err(|err| err.clone())?;
+
+        Ok(token)
+    }
+
+    pub fn expect_token(&mut self) -> Result<Token, ParseError> {
+        let token = self.next().ok_or_else(|| ParseError {
+            span: Span::ALL,
+            context: None,
+            kind: ParseErrorKind::UnexpectedEnd,
+        })??;
+
+        Ok(token)
+    }
+
+    pub fn expect_token_tag(&mut self, tag: TokenTag) -> Result<Token, ParseError> {
+        let token = self.expect_token()?;
+
+        let token_tag = token.kind.tag();
+
+        if token_tag != tag {
+            return Err(ParseError {
+                span: token.span,
+                context: None,
+                kind: ParseErrorKind::ExpectedTokenTag {
+                    expected: tag,
+                    got: token_tag,
+                },
+            });
+        }
+
+        Ok(token)
+    }
+
+    pub fn expect_token_kind(&mut self, kind: &TokenKind) -> Result<Token, ParseError> {
+        let token = self.expect_token()?;
+
+        if token.kind != *kind {
+            return Err(ParseError {
+                span: token.span,
+                context: None,
+                kind: ParseErrorKind::ExpectedTokenKind {
+                    expected: kind.clone(),
+                    got: token.kind,
+                },
+            });
+        }
+
+        Ok(token)
+    }
+
+    pub fn expect_symbol(&mut self, symbol: Symbol) -> Result<Token, ParseError> {
+        let span = self.expect_token_kind(&TokenKind::Symbol(symbol))?;
+        Ok(span)
+    }
+    
+    pub fn expect_keyword(&mut self, keyword: Keyword) -> Result<Token, ParseError> {
+        let span = self.expect_token_kind(&TokenKind::Keyword(keyword))?;
+        Ok(span)
+    }
+    
+    pub fn next_if_token_tag(&mut self, tag: TokenTag) -> Result<Option<Token>, ParseError> {
+        let token = self.next_if(|token| match token {
+            Ok(token) if token.kind.tag() == tag => true,
+            _ => false,
+        });
+
+        match token {
+            Some(Ok(ok)) => Ok(Some(ok)),
+            Some(Err(err)) => Err(err.into()),
+            None => Ok(None),
+        }
+    }
+
+    pub fn next_if_token_kind(&mut self, kind: &TokenKind) -> Result<Option<Token>, ParseError> {
+        let token = self.next_if(|token| match token {
+            Ok(token) if token.kind == *kind => true,
+            _ => false,
+        });
+
+        match token {
+            Some(Ok(ok)) => Ok(Some(ok)),
+            Some(Err(err)) => Err(err.into()),
+            None => Ok(None),
+        }
+    }
+
+    pub fn next_if_symbol(&mut self, symbol: Symbol) -> Result<Option<Span>, ParseError> {
+        let Some(token) = self.next_if_token_kind(&TokenKind::Symbol(symbol))? else { return Ok(None) };
+        Ok(Some(token.span))
+    }
+}
+
+impl<T: Iterator<Item = char>> Deref for Lexer<T> {
+    type Target = Peekable<LexerInner<T>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T: Iterator<Item = char>> DerefMut for Lexer<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T: Iterator<Item = char>> Iterator for Lexer<T> {
+    type Item = Result<Token, LexError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+    pub(crate) struct LexerInner<T: Iterator<Item = char>> {
+    chars: Peekable<Enumerate<T>>,
+}
+
+impl<T: Iterator<Item = char>> LexerInner<T> {
+    fn new(chars: T) -> Self {
+        Self {
             chars: chars.enumerate().peekable(),
         }
     }
 
-    pub fn expect_next(&mut self) -> Result<(usize, char), LexError> {
+    fn expect_next(&mut self) -> Result<(usize, char), LexError> {
         self.chars.next().ok_or(LexError {
             span: (..).into(),
             context: None,
@@ -249,7 +380,7 @@ impl<T: Iterator<Item = char>> Lexer<T> {
         })
     }
 
-    pub fn expect_char(&mut self, char: char) -> Result<usize, LexError> {
+    fn expect_char(&mut self, char: char) -> Result<usize, LexError> {
         let (index, next_char) = self.expect_next()?;
         
         if next_char != char {
@@ -267,7 +398,7 @@ impl<T: Iterator<Item = char>> Lexer<T> {
     }
 }
 
-impl<T: Iterator<Item = char>> Iterator for Lexer<T> {
+impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
     type Item = Result<Token, LexError>;
 
     fn next(&mut self) -> Option<Self::Item> {

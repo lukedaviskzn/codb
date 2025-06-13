@@ -1,6 +1,6 @@
 use std::{fmt::Debug, fs::File, io, num::NonZeroUsize};
 
-use crate::{db::{pager::Pager, Db}, query::{lexer::Lexer, parser::{ParseError, Parser}, DataQuery, Query, QueryExecutionError}, typesystem::value::Value};
+use crate::{db::{pager::Pager, Db}, query::{lexer::LexerInner, parser::{ParseError, Parser}, DataQuery, Query, QueryExecutionError}, typesystem::value::Value};
 
 pub mod query;
 
@@ -57,7 +57,7 @@ impl Connection {
 
     pub fn execute(&self, query: &str) -> Result<Value, ConnectionExecutionError> {
         let expr = {
-            let lexer = Lexer::new(query.chars());
+            let lexer = LexerInner::new(query.chars());
             let mut parser = Parser::new(lexer);
 
             let manifest = self.db.manifest();
@@ -72,7 +72,7 @@ impl Connection {
     }
 
     pub fn execute_schema(&self, query: &str) -> Result<Value, ConnectionExecutionError> {
-        let lexer = Lexer::new(query.chars());
+        let lexer = LexerInner::new(query.chars());
         let mut parser = Parser::new(lexer);
 
         let query = parser.parse_schema_query()?;

@@ -1,9 +1,10 @@
-use std::{borrow::Borrow, fmt::Display, iter::Peekable, ops::Bound, sync::{Arc, Mutex}};
+use std::{borrow::Borrow, collections::BTreeMap, fmt::{Debug, Display}, hash::Hash, ops::Bound, sync::{Arc, Mutex}};
 
 use codb_core::{Ident, IdentForest, IdentPath, IdentTree, NestedIdent};
+use indexmap::IndexMap;
 use itertools::Itertools;
 
-use crate::{db::{pager::Pager, registry::{CompositeTTypeId, Registry, TTypeId}, DbRelationSet}, expression::{ArithmeticOp, ArrayLiteral, Branch, ControlFlow, EnumLiteral, Expression, FunctionInvocation, IfControlFlow, InterpreterAction, Literal, LogicalOp, MatchControlFlow, Op, StructLiteral}, query::{lexer::TokenKind, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}}, typesystem::{function::{Function, FunctionArg}, ttype::{ArrayType, CompositeType, EnumType, ScalarType, StructType, TType}, value::ScalarValue, TypeError, TypeSet}};
+use crate::{db::{pager::Pager, registry::{CompositeTTypeId, Registry, TTypeId}, DbRelationSet}, expression::{ArithmeticOp, ArrayLiteral, Branch, CompositeLiteral, ControlFlow, EnumLiteral, Expression, FunctionInvocation, IfControlFlow, InterpreterAction, Literal, LogicalOp, MatchControlFlow, Op, StructLiteral}, query::{lexer::TokenKind, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}}, typesystem::{function::{Function, FunctionArg}, ttype::{ArrayType, CompositeType, EnumType, ScalarType, StructType, TType}, value::ScalarValue, TypeError, TypeSet}};
 
 use super::{lexer::{Keyword, LexContext, LexError, LexErrorKind, Lexer, Symbol, Token, TokenTag}, Span};
 
@@ -134,10 +135,8 @@ pub enum ParseErrorKind {
     },
     #[error("match branch has duplicate tag `{0}`")]
     DuplicateBranch(Ident),
-    #[error("struct type has duplicate field `{0}`")]
-    DuplicateField(Ident),
-    #[error("enum type has duplicate tag `{0}`")]
-    DuplicateTag(Ident),
+    #[error("duplicate key `{0}`")]
+    DuplicateKey(String),
     #[error("cannot create value of type `never`")]
     NeverValue,
 }
@@ -152,15 +151,590 @@ impl From<LexError> for ParseError {
     }
 }
 
+pub(crate) trait Parse {
+    type Args<'a>;
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized;
+    fn is_first(token: &TokenKind) -> bool;
+}
+
+pub(crate) struct ExpressionArgs<'a> {
+    pager: Arc<Mutex<Pager>>,
+    registry: &'a Registry,
+    relations: &'a DbRelationSet,
+}
+
+impl Parse for SchemaQuery {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let keyword_token = lexer.expect_token_tag(TokenTag::Keyword)?;
+        let TokenKind::Keyword(keyword) = keyword_token.kind else { unreachable!() };
+        
+        match keyword {
+            Keyword::Type => {
+                let (name, name_span) = IdentPath::parse(lexer, ()).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                lexer.expect_symbol(Symbol::Equal)?;
+                let (ttype, ttype_span) = CompositeType::parse(lexer, ()).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                Ok((SchemaQuery::Type(TypeSchemaQuery::Create {
+                    name,
+                    ttype,
+                }), keyword_token.span.merge(ttype_span)))
+            },
+            Keyword::Relation => {
+                let (name, _) = Ident::parse(lexer, ()).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                lexer.expect_symbol(Symbol::Equal).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                let (ttype, _) = StructType::parse(lexer, ())?;
+                
+                lexer.expect_symbol(Symbol::LessThan).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                let (pkey, pkey_span) = IdentForest::parse(lexer, ())?;
+                lexer.expect_symbol(Symbol::GreaterThan).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+
+                Ok((SchemaQuery::Relation(RelationSchemaQuery::Create {
+                    name,
+                    ttype,
+                    pkey,
+                }), keyword_token.span.merge(pkey_span)))
+            },
+            keyword => {
+                Err(ParseError {
+                    span: keyword_token.span,
+                    context: Some(ParseContext::ParsingSchemaQuery),
+                    kind: ParseErrorKind::ExpectedTokenKindOneOf {
+                        expected: [TokenKind::Keyword(Keyword::Type), TokenKind::Keyword(Keyword::Relation)].into(),
+                        got: TokenKind::Keyword(keyword),
+                    },
+                })
+            }
+        }
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        match token {
+            TokenKind::Keyword(Keyword::Type) => true,
+            TokenKind::Keyword(Keyword::Relation) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Parse for Ident {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let token = lexer.expect_token_tag(TokenTag::Ident)?;
+        let TokenKind::Ident(ident) = token.kind else { unreachable!() };
+        Ok((ident, token.span))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        matches!(token, TokenKind::Ident(_))
+    }
+}
+
+impl Parse for IdentPath {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (idents, list_span) = NonEmpty::parse(lexer, ListArgs { args: (), separator: Symbol::PathSep })
+            .map_err(|err| err.with_context(ParseContext::ParsingIdentPath))?;
+        
+        let mut ident_list = vec![idents.head];
+        ident_list.extend(idents.tail);
+
+        let ident_path = IdentPath::try_from(ident_list).expect("invalid ident path");
+
+        Ok((ident_path, list_span))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        Ident::is_first(token)
+    }
+}
+
+impl Parse for NestedIdent {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (ident_list, list_span) = NonEmpty::parse(lexer, ListArgs {
+            args: (),
+            separator: Symbol::Dot,
+        }).map_err(|err| err.with_context(ParseContext::ParsingNestedIdent))?;
+
+        let mut idents = vec![ident_list.head];
+        idents.extend(ident_list.tail);
+        
+        let nested_ident = NestedIdent::try_from(idents).expect("invalid nested ident");
+
+        Ok((nested_ident, list_span))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        Ident::is_first(token)
+    }
+}
+
+struct ListArgs<'a, P: Parse> {
+    args: P::Args<'a>,
+    separator: Symbol,
+}
+
+impl<P: Parse> Parse for Vec<P> where for<'a> P::Args<'a>: Clone {
+    type Args<'a> = ListArgs<'a, P>;
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let mut out = Vec::new();
+        let mut span: Option<Span> = None;
+        
+        while let Some(token) = lexer.peek() {
+            let token = token.as_ref().map_err(|err| err.clone())?;
+            
+            if !P::is_first(&token.kind) { break }
+
+            let (item, item_span) = P::parse(lexer, args.args.clone())?;
+            span = Some(span
+                .map(|span| span.merge(item_span))
+                .unwrap_or(item_span)
+            );
+
+            out.push(item);
+
+            if let Some(Ok(Token { kind: TokenKind::Symbol(symbol), .. })) = lexer.peek() {
+                if symbol != &args.separator {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok((out, span.unwrap_or(Span::ALL)))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        P::is_first(token)
+    }
+}
+
+struct NonEmpty<P: Parse> {
+    head: P,
+    tail: Vec<P>,
+}
+
+impl<P: Parse> Parse for NonEmpty<P> where for<'a> P::Args<'a>: Clone {
+    type Args<'a> = ListArgs<'a, P>;
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (head, head_span) = P::parse(lexer, args.args.clone())?;
+        let (tail, tail_span) = Vec::<P>::parse(lexer, args)?;
+
+        Ok((Self {
+            head,
+            tail,
+        }, head_span.merge(tail_span)))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        P::is_first(token)
+    }
+}
+
+impl Parse for CompositeType {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let token = lexer.expect_peek().map_err(|err| err.with_context(ParseContext::ParsingCompositeTTypeId))?;
+        match &token.kind {
+            TokenKind::Keyword(Keyword::Struct) => {
+                let (struct_type, struct_type_span) = StructType::parse(lexer, ())?;
+                Ok((CompositeType::Struct(struct_type), struct_type_span))
+            },
+            TokenKind::Keyword(Keyword::Enum) => {
+                let (enum_type, enum_type_span) = EnumType::parse(lexer, ())?;
+                Ok((CompositeType::Enum(enum_type), enum_type_span))
+            },
+            kind => return Err(ParseError {
+                span: token.span,
+                context: Some(ParseContext::ParsingCompositeTTypeId),
+                kind: ParseErrorKind::ExpectedTokenKindOneOf {
+                    expected: [
+                        TokenKind::Keyword(Keyword::Struct),
+                        TokenKind::Keyword(Keyword::Enum),
+                    ].into(),
+                    got: kind.clone(),
+                },
+            })
+        }
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        StructType::is_first(token) || EnumType::is_first(token)
+    }
+}
+
+impl Parse for StructType {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let struct_token = lexer.expect_keyword(Keyword::Struct).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
+        lexer.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
+
+        let (fields, fields_span) = IndexMap::parse(lexer, MapArgs {
+            key_args: (),
+            value_args: (),
+            map_seperator: Symbol::Colon,
+            entry_separator: Symbol::Comma,
+        })?;
+        
+        let bracket_token = lexer.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
+
+        let span = struct_token.span.merge(fields_span).merge(bracket_token.span);
+
+        Ok((StructType::new(fields), span))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        token == &TokenKind::Keyword(Keyword::Struct)
+    }
+}
+
+impl Parse for EnumType {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let enum_token = lexer.expect_keyword(Keyword::Enum).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
+        lexer.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
+
+        let (tags, tags_span) = IndexMap::parse(lexer, MapArgs {
+            key_args: (),
+            value_args: (),
+            map_seperator: Symbol::Comma,
+            entry_separator: Symbol::Comma,
+        })?;
+
+        let bracket_token = lexer.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
+
+        let span = enum_token.span.merge(tags_span).merge(bracket_token.span);
+
+        Ok((EnumType::new(tags), span))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        token == &TokenKind::Keyword(Keyword::Enum)
+    }
+}
+
+struct MapArgs<'a, K: Parse, V: Parse> {
+    key_args: K::Args<'a>,
+    value_args: V::Args<'a>,
+    map_seperator: Symbol,
+    entry_separator: Symbol,
+}
+
+impl<K: Parse + Hash + PartialEq + Eq + Debug, V: Parse> Parse for IndexMap<K, V>
+where for<'a> K::Args<'a>: Clone, for<'a> V::Args<'a>: Clone {
+    type Args<'a> = MapArgs<'a, K, V>;
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let mut out = IndexMap::new();
+        let mut span: Option<Span> = None;
+        
+        while let Some(token) = lexer.peek() {
+            let token = token.as_ref().map_err(|err| err.clone())?;
+
+            span = Some(token.span);
+            
+            if !K::is_first(&token.kind) { break }
+
+            let (key, mut entry_span) = K::parse(lexer, args.key_args.clone())?;
+
+            if out.contains_key(&key) {
+                return Err(ParseError {
+                    span: span.unwrap_or(Span::ALL),
+                    context: Some(ParseContext::ParsingStructType),
+                    kind: ParseErrorKind::DuplicateKey(format!("{key:?}")),
+                })
+            }
+
+            lexer.expect_symbol(args.map_seperator)?;
+
+            let (value, value_span) = V::parse(lexer, args.value_args.clone())?;
+            entry_span = entry_span.merge(value_span);
+
+            out.insert(key, value);
+            
+            span = Some(span.expect("span not set").merge(entry_span));
+
+            if let Some(Ok(Token { kind: TokenKind::Symbol(symbol), .. })) = lexer.peek() {
+                if symbol != &args.entry_separator {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok((out, span.unwrap_or(Span::ALL)))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        K::is_first(token)
+    }
+}
+
+impl<K: Parse + Hash + Ord + Debug, V: Parse> Parse for BTreeMap<K, V>
+where for<'a> K::Args<'a>: Clone, for<'a> V::Args<'a>: Clone {
+    type Args<'a> = MapArgs<'a, K, V>;
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let mut out = BTreeMap::new();
+        let mut span: Option<Span> = None;
+        
+        while let Some(token) = lexer.peek() {
+            let token = token.as_ref().map_err(|err| err.clone())?;
+
+            span = Some(token.span);
+            
+            if !K::is_first(&token.kind) { break }
+
+            let (key, mut entry_span) = K::parse(lexer, args.key_args.clone())?;
+
+            if out.contains_key(&key) {
+                return Err(ParseError {
+                    span: span.unwrap_or(Span::ALL),
+                    context: Some(ParseContext::ParsingStructType),
+                    kind: ParseErrorKind::DuplicateKey(format!("{key:?}")),
+                })
+            }
+
+            lexer.expect_symbol(args.map_seperator)?;
+
+            let (value, value_span) = V::parse(lexer, args.value_args.clone())?;
+            entry_span = entry_span.merge(value_span);
+
+            out.insert(key, value);
+            
+            span = Some(span.expect("span not set").merge(entry_span));
+
+            if let Some(Ok(Token { kind: TokenKind::Symbol(symbol), .. })) = lexer.peek() {
+                if symbol != &args.entry_separator {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok((out, span.unwrap_or(Span::ALL)))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        K::is_first(token)
+    }
+}
+
+impl Parse for TTypeId {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let token = lexer.expect_peek()
+            .map_err(|err| err.with_context(ParseContext::ParsingTTypeId))?
+            .clone();
+
+        let spanned_ttype_id = match token.kind {
+            TokenKind::ScalarType(scalar_type) => {
+                lexer.expect_token()?;
+                (TTypeId::Scalar(scalar_type), token.span)
+            },
+            TokenKind::Keyword(Keyword::Struct | Keyword::Enum) => {
+                let (composite_type, type_span) = CompositeType::parse(lexer, ())?;
+
+                let span = token.span
+                    .merge(type_span)
+                    .extend(Some(1))
+                    .prepend(Some(1));
+
+                (TTypeId::Composite(CompositeTTypeId::Anonymous(Box::new(composite_type))), span)
+            },
+            TokenKind::Ident(ident) => {
+                lexer.expect_token()?;
+                let mut idents = vec![ident];
+
+                let mut span = token.span;
+
+                if let Some(_) = lexer.next_if_symbol(Symbol::PathSep)? {
+                    let (ident_path, path_span) = IdentPath::parse(lexer, ())?;
+                    span = span.merge(path_span);
+
+                    for ident in ident_path {
+                        idents.push(ident);
+                    }
+                }
+
+                let path = IdentPath::try_from(idents).expect("invalid ident path");
+                
+                (TTypeId::Composite(CompositeTTypeId::Path(path)), span)
+            },
+            TokenKind::Symbol(Symbol::SquareBracketOpen) => {
+                lexer.expect_token()?;
+                let length = if let Some(Token { kind: TokenKind::ScalarLiteral(ScalarValue::Int64(length)), .. }) = lexer.next_if_token_tag(TokenTag::ScalarLiteral)? {
+                    Some(length as u64)
+                } else {
+                    None
+                };
+                lexer.expect_symbol(Symbol::SquareBracketClose).map_err(|err| err.with_context(ParseContext::ParsingArrayType))?;
+
+                let (inner_ttype_id, inner_span) = TTypeId::parse(lexer, ())?;
+
+                let span = token.span.merge(inner_span);
+
+                let array_type = ArrayType::new(inner_ttype_id, length);
+
+                (array_type.into(), span)
+            },
+            kind => return Err(ParseError {
+                span: token.span,
+                context: Some(ParseContext::ParsingTTypeId),
+                kind: ParseErrorKind::UnexpectedTokenKind(kind.clone()),
+            }),
+        };
+
+        Ok(spanned_ttype_id)
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        match token {
+            TokenKind::ScalarType(_) => true,
+            TokenKind::Keyword(Keyword::Struct | Keyword::Enum) => true,
+            TokenKind::Ident(_) => true,
+            TokenKind::Symbol(Symbol::SquareBracketOpen) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Parse for IdentForest {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (trees, list_span) = Vec::parse(lexer, ListArgs {
+            args: (),
+            separator: Symbol::Comma,
+        }).map_err(|err| err.with_context(ParseContext::ParsingIdentForest))?;
+
+        Ok((IdentForest::new(trees), list_span))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        IdentTree::is_first(token)
+    }
+}
+
+impl Parse for IdentTree {
+    type Args<'a> = ();
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (ident, ident_span) = Ident::parse(lexer, ())
+            .map_err(|err| err.with_context(ParseContext::ParsingIdentTree))?;
+        
+        if let None = lexer.next_if_token_kind(&TokenKind::Symbol(Symbol::Dot)).map_err(|err| err.with_context(ParseContext::ParsingIdentTree))? {
+            return Ok((IdentTree::new(ident, IdentForest::empty()), ident_span));
+        }
+
+        let spanned_forest;
+        if let Some(_) = lexer.next_if_token_kind(&TokenKind::Symbol(Symbol::BracketOpen)).map_err(|err| err.with_context(ParseContext::ParsingIdentTree))? {
+            spanned_forest = IdentForest::parse(lexer, ()).map_err(|err| err.with_context(ParseContext::ParsingIdentTree))?;
+            lexer.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingIdentTree))?;
+        } else {
+            let (ident_tree, ident_tree_span) = IdentTree::parse(lexer, ())?;
+            let span = ident_span.merge(ident_tree_span);
+            spanned_forest = (IdentForest::new([ident_tree]), span);
+        }
+
+        let (forest, forest_span) = spanned_forest;
+
+        Ok((IdentTree::new(ident, forest), ident_span.merge(forest_span)))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        Ident::is_first(token)
+    }
+}
+
+impl Parse for StructLiteral {
+    type Args<'a> = ExpressionArgs<'a>;
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (ttype_id, type_span) = TTypeId::parse(lexer, ()).map_err(|err| err.with_context(ParseContext::ParsingStructLiteral))?;
+        
+        lexer.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingStructLiteral))?;
+
+        let (fields, fields_span) = BTreeMap::parse(lexer, MapArgs {
+            key_args: (),
+            value_args: args,
+            map_seperator: Symbol::Colon,
+            entry_separator: Symbol::Comma,
+        }).map_err(|err| err.with_context(ParseContext::ParsingStructLiteral))?;
+        
+        lexer.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingStructLiteral))?;
+
+        let span = type_span.merge(fields_span).extend(Some(1));
+
+        Ok((StructLiteral::new(ttype_id, fields), span))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        Ident::is_first(token) || token == &TokenKind::Keyword(Keyword::Struct)
+    }
+}
+
+impl Parse for EnumLiteral {
+    type Args<'a> = ExpressionArgs<'a>;
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (ttype_id, type_span) = TTypeId::parse(lexer, ()).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
+
+        lexer.expect_symbol(Symbol::Hash).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
+
+        let (tag, ident_span) = Ident::parse(lexer, ()).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
+
+        lexer.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
+        
+        let (expr, expr_span) = Expression::parse(lexer, args)?;
+        
+        lexer.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
+
+        let span = type_span.merge(expr_span).extend(Some(1));
+
+        Ok((EnumLiteral::new(ttype_id, tag, expr), span))
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        Ident::is_first(token) || token == &TokenKind::Keyword(Keyword::Enum)
+    }
+}
+
+impl Parse for CompositeLiteral {
+    type Args<'a> = ExpressionArgs<'a>;
+
+    fn parse<T: Iterator<Item = char>>(lexer: &mut Lexer<T>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        todo!()
+    }
+
+    fn is_first(token: &TokenKind) -> bool {
+        todo!()
+    }
+}
+
 pub(crate) struct Parser<T: Iterator<Item = char>> {
-    lexer: Peekable<Lexer<T>>,
+    lexer: Lexer<T>,
 }
 
 impl<T: Iterator<Item = char>> Parser<T> {
     #[allow(unused)]
     pub fn new(lexer: Lexer<T>) -> Self {
         Self {
-            lexer: lexer.peekable(),
+            lexer,
         }
     }
 
@@ -178,48 +752,6 @@ impl<T: Iterator<Item = char>> Parser<T> {
         }
 
         Ok(expr)
-    }
-
-    pub fn parse_schema_query(&mut self) -> Result<SchemaQuery, ParseError> {
-        let keyword_token = self.expect_token_tag(TokenTag::Keyword)?;
-        let TokenKind::Keyword(keyword) = keyword_token.kind else { unreachable!() };
-        
-        match keyword {
-            Keyword::Type => {
-                let (_, name) = self.parse_ident_path().map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
-                self.expect_symbol(Symbol::Equal)?;
-                let (_, ttype) = self.parse_composite_ttype().map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
-                Ok(SchemaQuery::Type(TypeSchemaQuery::Create {
-                    name,
-                    ttype,
-                }))
-            },
-            Keyword::Relation => {
-                let (_, name) = self.expect_ident()?;
-                self.expect_symbol(Symbol::Equal).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
-                let (_, ttype) = self.parse_struct_type()?;
-                
-                self.expect_symbol(Symbol::LessThan).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
-                let (_, pkey) = self.parse_ident_forest()?;
-                self.expect_symbol(Symbol::GreaterThan).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
-
-                Ok(SchemaQuery::Relation(RelationSchemaQuery::Create {
-                    name,
-                    ttype,
-                    pkey,
-                }))
-            },
-            keyword => {
-                Err(ParseError {
-                    span: keyword_token.span,
-                    context: Some(ParseContext::ParsingSchemaQuery),
-                    kind: ParseErrorKind::ExpectedTokenKindOneOf {
-                        expected: [TokenKind::Keyword(Keyword::Type), TokenKind::Keyword(Keyword::Relation)].into(),
-                        got: TokenKind::Keyword(keyword),
-                    },
-                })
-            }
-        }
     }
 
     pub fn parse_expression(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet) -> Result<(Span, Expression), ParseError> {
@@ -627,58 +1159,6 @@ impl<T: Iterator<Item = char>> Parser<T> {
         Ok(spanned_expression)
     }
 
-    pub fn parse_nested_ident(&mut self) -> Result<(Span, NestedIdent), ParseError> {
-        let (list_span, idents) = self.parse_non_empty_list(Self::expect_ident, &TokenKind::Symbol(Symbol::Dot))
-            .map_err(|err| err.with_context(ParseContext::ParsingNestedIdent))?;
-        
-        let idents = idents.into_iter().map(|(_, ident)| ident).collect_vec();
-
-        let nested_ident = NestedIdent::try_from(idents).expect("invalid nested ident");
-
-        Ok((list_span, nested_ident))
-    }
-
-    pub fn parse_ident_path(&mut self) -> Result<(Span, IdentPath), ParseError> {
-        let (list_span, idents) = self.parse_non_empty_list(Self::expect_ident, &TokenKind::Symbol(Symbol::PathSep))
-            .map_err(|err| err.with_context(ParseContext::ParsingIdentPath))?;
-        let idents = idents.into_iter().map(|(_, ident)| ident).collect_vec();
-
-        let ident_path = IdentPath::try_from(idents).expect("invalid ident path");
-
-        Ok((list_span, ident_path))
-    }
-
-    pub fn parse_ident_forest(&mut self) -> Result<(Span, IdentForest), ParseError> {
-        let (list_span, trees) = self.parse_non_empty_list(Self::parse_ident_tree, &TokenKind::Symbol(Symbol::Comma))
-            .map_err(|err| err.with_context(ParseContext::ParsingIdentForest))?;
-        let trees = trees.into_iter().map(|(_, tree)| tree).collect_vec();
-
-        Ok((list_span, IdentForest::new(trees)))
-    }
-
-    pub fn parse_ident_tree(&mut self) -> Result<(Span, IdentTree), ParseError> {
-        let (ident_span, ident) = self.expect_ident()
-            .map_err(|err| err.with_context(ParseContext::ParsingIdentTree))?;
-        
-        if let None = self.next_if_token_kind(&TokenKind::Symbol(Symbol::Dot)).map_err(|err| err.with_context(ParseContext::ParsingIdentTree))? {
-            return Ok((ident_span, IdentTree::new(ident, IdentForest::empty())));
-        }
-
-        let spanned_forest;
-        if let Some(_) = self.next_if_token_kind(&TokenKind::Symbol(Symbol::BracketOpen)).map_err(|err| err.with_context(ParseContext::ParsingIdentTree))? {
-            spanned_forest = self.parse_ident_forest().map_err(|err| err.with_context(ParseContext::ParsingIdentTree))?;
-            self.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingIdentTree))?;
-        } else {
-            let (ident_tree_span, ident_tree) = self.parse_ident_tree()?;
-            let span = ident_span.merge(ident_tree_span);
-            spanned_forest = (span, IdentForest::new([ident_tree]));
-        }
-
-        let (forest_span, forest) = spanned_forest;
-
-        Ok((forest_span, IdentTree::new(ident, forest)))
-    }
-
     pub fn parse_function(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet) -> Result<(Span, Function), ParseError> {
         // (args, ...)
         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingFunction))?;
@@ -850,7 +1330,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 return Err(ParseError {
                     span,
                     context: Some(ParseContext::ParsingStructLiteral),
-                    kind: ParseErrorKind::DuplicateField(ident),
+                    kind: ParseErrorKind::DuplicateKey(ident),
                 });
             }
             fields.insert(ident, value);
@@ -889,253 +1369,6 @@ impl<T: Iterator<Item = char>> Parser<T> {
         let span = ident_span.merge(value_span).extend(Some(1));
 
         Ok((span, (ident, value)))
-    }
-
-    pub fn parse_composite_ttype(&mut self) -> Result<(Span, CompositeType), ParseError> {
-        let token = self.expect_peek().map_err(|err| err.with_context(ParseContext::ParsingCompositeTTypeId))?;
-        match &token.kind {
-            TokenKind::Keyword(Keyword::Struct) => {
-                let (struct_type_span, struct_type) = self.parse_struct_type()?;
-                Ok((struct_type_span, CompositeType::Struct(struct_type)))
-            },
-            TokenKind::Keyword(Keyword::Enum) => {
-                let (enum_type_span, enum_type) = self.parse_enum_type()?;
-                Ok((enum_type_span, CompositeType::Enum(enum_type)))
-            },
-            kind => return Err(ParseError {
-                span: token.span,
-                context: Some(ParseContext::ParsingCompositeTTypeId),
-                kind: ParseErrorKind::ExpectedTokenKindOneOf {
-                    expected: [
-                        TokenKind::Keyword(Keyword::Struct),
-                        TokenKind::Keyword(Keyword::Enum),
-                    ].into(),
-                    got: kind.clone(),
-                },
-            })
-        }
-    }
-
-    pub fn parse_struct_type(&mut self) -> Result<(Span, StructType), ParseError> {
-        self.expect_keyword(Keyword::Struct).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
-        self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
-        
-        let (field_list_span, field_list) = self.parse_non_empty_list(Self::parse_field, &TokenKind::Symbol(Symbol::Comma))?;
-        let field_list = field_list.into_iter()
-            .map(|(_, (ident, ttype_id))| (ident, ttype_id))
-            .collect_vec();
-        self.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
-
-        let span = field_list_span.extend(Some(1)).prepend(Some(1));
-
-        let mut fields = indexmap! {};
-        for (ident, ttype_id) in field_list {
-            if fields.contains_key(&ident) {
-                return Err(ParseError {
-                    span,
-                    context: Some(ParseContext::ParsingStructType),
-                    kind: ParseErrorKind::DuplicateField(ident),
-                })
-            }
-            fields.insert(ident, ttype_id);
-        }
-
-        Ok((span, StructType::new(fields)))
-    }
-
-    pub fn parse_enum_type(&mut self) -> Result<(Span, EnumType), ParseError> {
-        self.expect_keyword(Keyword::Enum).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
-        self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
-        let (tag_list_span, tag_list) = self.parse_non_empty_list(Self::parse_tag, &TokenKind::Symbol(Symbol::Comma))?;
-        let tag_list = tag_list.into_iter()
-            .map(|(_, (ident, ttype_id))| (ident, ttype_id))
-            .collect_vec();
-        self.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
-
-        let span = tag_list_span.extend(Some(1)).prepend(Some(1));
-
-        let mut tags = indexmap! {};
-        for (ident, ttype_id) in tag_list {
-            if tags.contains_key(&ident) {
-                return Err(ParseError {
-                    span,
-                    context: Some(ParseContext::ParsingEnumType),
-                    kind: ParseErrorKind::DuplicateTag(ident),
-                })
-            }
-            tags.insert(ident, ttype_id);
-        }
-
-        Ok((span, EnumType::new(tags)))
-    }
-
-    pub fn parse_field(&mut self) -> Result<(Span, (Ident, TTypeId)), ParseError> {
-        let (ident_span, ident) = self.expect_ident().map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
-        self.expect_symbol(Symbol::Colon).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
-        let (type_span, ttype_id) = self.parse_ttype_id()?;
-
-        let span = ident_span.merge(type_span);
-
-        Ok((span, (ident, ttype_id)))
-    }
-
-    pub fn parse_tag(&mut self) -> Result<(Span, (Ident, TTypeId)), ParseError> {
-        let (ident_span, ident) = self.expect_ident().map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
-        self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
-        let (type_span, ttype_id) = self.parse_ttype_id()?;
-        self.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
-
-        let span = ident_span
-            .merge(type_span)
-            .extend(Some(1));
-
-        Ok((span, (ident, ttype_id)))
-    }
-
-    pub fn parse_ttype_id(&mut self) -> Result<(Span, TTypeId), ParseError> {
-        let token = self.expect_peek()
-            .map_err(|err| err.with_context(ParseContext::ParsingTTypeId))?
-            .clone();
-
-        let spanned_ttype_id = match token.kind {
-            TokenKind::ScalarType(scalar_type) => {
-                self.expect_token()?;
-                (token.span, TTypeId::Scalar(scalar_type))
-            },
-            TokenKind::Keyword(Keyword::Struct | Keyword::Enum) => {
-                let (type_span, composite_type) = self.parse_composite_ttype()?;
-
-                let span = token.span
-                    .merge(type_span)
-                    .extend(Some(1))
-                    .prepend(Some(1));
-
-                (span, TTypeId::Composite(CompositeTTypeId::Anonymous(Box::new(composite_type))))
-            },
-            TokenKind::Ident(ident) => {
-                self.expect_token()?;
-                let mut idents = vec![ident];
-
-                let mut span = token.span;
-
-                if let Some(_) = self.next_if_symbol(Symbol::PathSep)? {
-                    let (path_span, ident_path) = self.parse_ident_path()?;
-                    span = span.merge(path_span);
-
-                    for ident in ident_path {
-                        idents.push(ident);
-                    }
-                }
-
-                let path = IdentPath::try_from(idents).expect("invalid ident path");
-                
-                (span, TTypeId::Composite(CompositeTTypeId::Path(path)))
-            },
-            TokenKind::Symbol(Symbol::SquareBracketOpen) => {
-                self.expect_token()?;
-                let length = if let Some(Token { kind: TokenKind::ScalarLiteral(ScalarValue::Int64(length)), .. }) = self.next_if_token_tag(TokenTag::ScalarLiteral)? {
-                    Some(length as u64)
-                } else {
-                    None
-                };
-                self.expect_symbol(Symbol::SquareBracketClose).map_err(|err| err.with_context(ParseContext::ParsingArrayType))?;
-
-                let (inner_span, inner_ttype_id) = self.parse_ttype_id()?;
-
-                let span = token.span.merge(inner_span);
-
-                let array_type = ArrayType::new(inner_ttype_id, length);
-
-                (span, array_type.into())
-            },
-            kind => return Err(ParseError {
-                span: token.span,
-                context: Some(ParseContext::ParsingTTypeId),
-                kind: ParseErrorKind::UnexpectedTokenKind(kind.clone()),
-            }),
-        };
-
-        Ok(spanned_ttype_id)
-    }
-
-    pub fn parse_non_empty_list<I>(&mut self, mut parse_item: impl FnMut(&mut Parser<T>) -> Result<(Span, I), ParseError>, separator: &TokenKind) -> Result<(Span, Box<[(Span, I)]>), ParseError> {
-        let (mut span, item) = parse_item(self)?;
-        let mut items = vec![(span, item)];
-
-        while let Some(_) = self.next_if_token_kind(&separator)? {
-            let (item_span, item) = parse_item(self)?;
-            items.push((item_span, item));
-
-            span = span.merge(item_span);
-        }
-
-        Ok((span, items.into()))
-    }
-    
-    pub fn parse_non_empty_list_with_rel_args<I>(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, mut parse_item: impl FnMut(&mut Parser<T>, Arc<Mutex<Pager>>, &Registry, &DbRelationSet) -> Result<(Span, I), ParseError>, separator: &TokenKind) -> Result<(Span, Box<[(Span, I)]>), ParseError> {
-        Self::parse_non_empty_list(self, |parser| parse_item(parser, pager.clone(), registry, relations), separator)
-    }
-    
-    pub fn expect_token(&mut self) -> Result<Token, ParseError> {
-        let token = self.lexer.next().ok_or_else(|| ParseError {
-            span: Span::ALL,
-            context: None,
-            kind: ParseErrorKind::UnexpectedEnd,
-        })??;
-
-        Ok(token)
-    }
-    
-    pub fn expect_peek(&mut self) -> Result<&Token, ParseError> {
-        let token = self.lexer.peek().ok_or_else(|| ParseError {
-            span: Span::ALL,
-            context: None,
-            kind: ParseErrorKind::UnexpectedEnd,
-        })?.as_ref().map_err(|err| err.clone())?;
-
-        Ok(token)
-    }
-    
-    pub fn expect_token_tag(&mut self, tag: TokenTag) -> Result<Token, ParseError> {
-        let token = self.expect_token()?;
-
-        let token_tag = token.kind.tag();
-
-        if token_tag != tag {
-            return Err(ParseError {
-                span: token.span,
-                context: None,
-                kind: ParseErrorKind::ExpectedTokenTag {
-                    expected: tag,
-                    got: token_tag,
-                },
-            });
-        }
-
-        Ok(token)
-    }
-
-    pub fn expect_token_kind(&mut self, kind: &TokenKind) -> Result<Span, ParseError> {
-        let token = self.expect_token()?;
-
-        if token.kind != *kind {
-            return Err(ParseError {
-                span: token.span,
-                context: None,
-                kind: ParseErrorKind::ExpectedTokenKind {
-                    expected: kind.clone(),
-                    got: token.kind,
-                },
-            });
-        }
-
-        Ok(token.span)
-    }
-
-    pub fn expect_ident(&mut self) -> Result<(Span, Ident), ParseError> {
-        let token = self.expect_token_tag(TokenTag::Ident)?;
-        let TokenKind::Ident(ident) = token.kind else { unreachable!() };
-        Ok((token.span, ident))
     }
 
     pub fn expect_int32(&mut self) -> Result<(Span, i32), ParseError> {
@@ -1183,51 +1416,10 @@ impl<T: Iterator<Item = char>> Parser<T> {
         Ok((token.span, string))
     }
 
-    pub fn expect_symbol(&mut self, symbol: Symbol) -> Result<Span, ParseError> {
-        let span = self.expect_token_kind(&TokenKind::Symbol(symbol))?;
-        Ok(span)
-    }
-    
-    pub fn expect_keyword(&mut self, keyword: Keyword) -> Result<Span, ParseError> {
-        let span = self.expect_token_kind(&TokenKind::Keyword(keyword))?;
-        Ok(span)
-    }
-    
-    pub fn next_if_token_tag(&mut self, tag: TokenTag) -> Result<Option<Token>, ParseError> {
-        let token = self.lexer.next_if(|token| match token {
-            Ok(token) if token.kind.tag() == tag => true,
-            _ => false,
-        });
-
-        match token {
-            Some(Ok(ok)) => Ok(Some(ok)),
-            Some(Err(err)) => Err(err.into()),
-            None => Ok(None),
-        }
-    }
-
-    pub fn next_if_token_kind(&mut self, kind: &TokenKind) -> Result<Option<Token>, ParseError> {
-        let token = self.lexer.next_if(|token| match token {
-            Ok(token) if token.kind == *kind => true,
-            _ => false,
-        });
-
-        match token {
-            Some(Ok(ok)) => Ok(Some(ok)),
-            Some(Err(err)) => Err(err.into()),
-            None => Ok(None),
-        }
-    }
-
     pub fn next_if_ident(&mut self) -> Result<Option<(Span, Ident)>, ParseError> {
         let Some(token) = self.next_if_token_tag(TokenTag::Ident)? else { return Ok(None) };
         let TokenKind::Ident(ident) = token.kind else { unreachable!() };
         Ok(Some((token.span, ident)))
-    }
-
-    pub fn next_if_symbol(&mut self, symbol: Symbol) -> Result<Option<Span>, ParseError> {
-        let Some(token) = self.next_if_token_kind(&TokenKind::Symbol(symbol))? else { return Ok(None) };
-        Ok(Some(token.span))
     }
 }
 
