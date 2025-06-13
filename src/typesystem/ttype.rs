@@ -85,9 +85,12 @@ impl From<ArrayType> for TType {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CompositeType {
+    #[brw(magic = 0u8)]
     Struct(StructType),
+    #[brw(magic = 1u8)]
     Enum(EnumType),
 }
 
@@ -142,15 +145,20 @@ impl TryFrom<TType> for CompositeType {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StructType {
+    #[bw(calc = self.fields.len() as u64)]
+    len: u64,
+    #[br(count = len, map = |fields: Vec<(Ident, TTypeId)>| IndexMap::from_iter(fields.into_iter()))]
+    #[bw(map = |fields| Vec::<(Ident, TTypeId)>::from_iter(fields.clone().into_iter()))]
     fields: IndexMap<Ident, TTypeId>,
 }
 
 impl StructType {
     pub fn new(fields: IndexMap<Ident, TTypeId>) -> StructType {
         StructType {
-            fields: fields.into(),
+            fields,
         }
     }
 
@@ -232,8 +240,13 @@ impl TryFrom<CompositeType> for StructType {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnumType {
+    #[bw(calc = self.tags.len() as u64)]
+    len: u64,
+    #[br(count = len, map = |tags: Vec<(Ident, TTypeId)>| IndexMap::from_iter(tags.into_iter()))]
+    #[bw(map = |tags| Vec::<(Ident, TTypeId)>::from_iter(tags.clone().into_iter()))]
     tags: IndexMap<Ident, TTypeId>,
 }
 
@@ -329,13 +342,20 @@ impl TryFrom<CompositeType> for EnumType {
     }
 }
 
+#[binrw]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ScalarType {
+    #[brw(magic = 0u8)]
     Never,
+    #[brw(magic = 1u8)]
     Unit,
+    #[brw(magic = 2u8)]
     Bool,
+    #[brw(magic = 3u8)]
     Int32,
+    #[brw(magic = 4u8)]
     Int64,
+    #[brw(magic = 5u8)]
     String,
 }
 
@@ -392,9 +412,15 @@ impl TryFrom<TType> for ScalarType {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArrayType {
     inner_ttype_id: TTypeId,
+    #[bw(calc = length.is_some() as u8)]
+    #[br(assert(is_finite <= 1))]
+    is_finite: u8,
+    #[br(map = |length: RowSize| if is_finite > 0 { Some(length) } else { None })]
+    #[bw(map = |length| length.unwrap_or_default())]
     length: Option<RowSize>,
 }
 

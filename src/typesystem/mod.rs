@@ -13,62 +13,62 @@ pub mod scope;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TypeError {
-    #[error("unknown relation '{0}'")]
+    #[error("unknown relation `{0}`")]
     UnknownRelation(Ident),
-    #[error("unknown field '{0}'")]
+    #[error("unknown field `{0}`")]
     UnknownField(Ident),
-    #[error("missing field '{0}'")]
+    #[error("missing field `{0}`")]
     MissingField(Ident),
-    #[error("unknown tag '{0}'")]
+    #[error("unknown tag `{0}`")]
     UnknownTag(Ident),
-    #[error("missing tag '{0}'")]
+    #[error("missing tag `{0}`")]
     MissingTag(Ident),
-    #[error("cannot access enum tag '{0}' using '.' operator, use match")]
+    #[error("cannot access enum tag `{0}` using `.` operator, use match")]
     DotTag(Ident),
-    #[error("cannot access field '{0}' on scalar")]
+    #[error("cannot access field `{0}` on scalar")]
     ScalarField(Ident),
-    #[error("cannot access field '{0}' on array")]
+    #[error("cannot access field `{0}` on array")]
     ArrayField(Ident),
-    #[error("value type invalid, expected {expected:?} got {got:?}")]
+    #[error("value type invalid, expected `{expected:?}` got `{got:?}`")]
     ValueTypeInvalid {
         expected: TType,
         got: Value,
     },
-    #[error("value type invalid, expected {expected:?} got {got:?}")]
+    #[error("value type invalid, expected `{expected:?}` got `{got:?}`")]
     ValueTypeIdInvalid {
         expected: TTypeId,
         got: Value,
     },
-    #[error("type invalid, expected {expected:?} got {got:?}")]
+    #[error("type invalid, expected `{expected:?}` got `{got:?}`")]
     TypeInvalid {
         expected: TType,
         got: TType,
     },
-    #[error("type invalid, expected {expected:?} got {got:?}")]
+    #[error("type invalid, expected `{expected:?}` got `{got:?}`")]
     TypeSetInvalid {
         expected: TypeSet,
         got: TType,
     },
-    #[error("type invalid, expected {expected:?} got {got:?}")]
+    #[error("type invalid, expected `{expected:?}` got `{got:?}`")]
     ValueTypeSetInvalid {
         expected: TypeSet,
         got: Value,
     },
-    #[error("type invalid, expected {expected:?} got {got:?}")]
+    #[error("type invalid, expected `{expected:?}` got `{got:?}`")]
     TypeIdInvalid {
         expected: TTypeId,
         got: TTypeId,
     },
-    #[error("function expects {expected} arguments, got {got}")]
+    #[error("function expects `{expected}` arguments, got `{got}`")]
     FunctionArgLen {
         expected: usize,
         got: usize,
     },
-    #[error("function has two arguments named {arg:?}")]
+    #[error("function has two arguments named `{arg:?}`")]
     FunctionDuplicateArg {
         arg: Ident,
     },
-    #[error("array expects {expected} entries, got {got}")]
+    #[error("array expects `{expected}` entries, got `{got}`")]
     ArrayLen {
         expected: u64,
         got: u64,

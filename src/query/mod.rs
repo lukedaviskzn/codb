@@ -1,9 +1,10 @@
-use std::{any::Any, fmt::{Debug, Display}, ops::{Bound, RangeBounds}};
+use std::{fmt::{Debug, Display}, ops::{Bound, RangeBounds}};
 
-use crate::expression::{EvalError, Expression};
+use crate::{expression::{EvalError, Expression}, query::schema_query::{SchemaError, SchemaQuery}, typesystem::TypeError};
 
 pub mod lexer;
 pub mod parser;
+pub mod schema_query;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Span {
@@ -119,7 +120,7 @@ impl Debug for Span {
         if let Some(length) = self.length {
             if length > 1 {
                 write!(f, "..")?;
-                write!(f, "{length}")?;
+                write!(f, "{}", self.start + length)?;
             }
         } else {
             write!(f, "..")?;
@@ -136,13 +137,19 @@ impl Display for Span {
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryExecutionError {
-    #[error("{0}")]
+    #[error("Type Error: {0}")]
+    TypeError(#[from] TypeError),
+    #[error("Eval Error: {0}")]
     EvalError(#[from] EvalError),
-    #[error("an unexpected error has occurred: {0:?}")]
-    UnexpectedPanic(Box<dyn Any + Send + 'static>),
+    #[error("Schema Error: {0}")]
+    SchemaError(#[from] SchemaError),
 }
 
+#[derive(Debug, Clone)]
 pub enum Query {
-    Data(Expression),
-    // Schema(/* schema alteration instructions */),
+    Data(DataQuery),
+    Schema(SchemaQuery),
 }
+
+#[derive(Debug, Clone)]
+pub struct DataQuery(pub Expression);

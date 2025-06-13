@@ -1,0 +1,12 @@
+[package]
+name = "codb-shell"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+ariadne = "0.5.1"
+clap = { version = "4.5.39", features = ["derive"] }
+codb = { version = "0.1.0", path = ".." }
+ctrlc = "3.4.7"
+rustyline = "16.0.0"

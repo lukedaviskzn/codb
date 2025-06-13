@@ -2,24 +2,31 @@ use std::{borrow::Borrow, fmt::{Debug, Display}, ops::Deref, str::FromStr};
 
 use crate::{ParseIdentError};
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
-pub struct Ident(String);
+pub struct Ident {
+    #[bw(calc = self.inner.len() as u64)]
+    len: u64,
+    #[br(count = len, try_map = |bytes: Vec<u8>| String::from_utf8(bytes))]
+    #[bw(map = |string| string.as_bytes())]
+    inner: String,
+}
 
 impl Debug for Ident {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.0, f)
+        Display::fmt(&self.inner, f)
     }
 }
 
 impl Display for Ident {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.0, f)
+        Display::fmt(&self.inner, f)
     }
 }
 
 impl Into<String> for Ident {
     fn into(self) -> String {
-        self.0
+        self.inner
     }
 }
 
@@ -46,20 +53,22 @@ impl TryFrom<String> for Ident {
         if let Some(invalid_char) = value.chars().find(|c| !c.is_alphanumeric() && *c != '_') {
             Err(ParseIdentError::InvalidChar(invalid_char))
         } else {
-            Ok(Self(value))
+            Ok(Self {
+                inner: value,
+            })
         }
     }
 }
 
 impl AsRef<str> for Ident {
     fn as_ref(&self) -> &str {
-        &self.0
+        &self.inner
     }
 }
 
 impl Borrow<str> for Ident {
     fn borrow(&self) -> &str {
-        &self.0
+        &self.inner
     }
 }
 
@@ -67,18 +76,18 @@ impl Deref for Ident {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.inner
     }
 }
 
 impl PartialEq<str> for Ident {
     fn eq(&self, other: &str) -> bool {
-        self.0 == other
+        self.inner == other
     }
 }
 
 impl PartialEq<String> for Ident {
     fn eq(&self, other: &String) -> bool {
-        &self.0 == other
+        &self.inner == other
     }
 }

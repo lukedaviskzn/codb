@@ -2,12 +2,16 @@ use std::{collections::BTreeMap, fmt::Debug};
 
 use codb_core::Ident;
 
-use crate::{error::IdentTaken, typesystem::{function::Function, ttype::CompositeType}};
+use crate::{typesystem::{function::Function, ttype::CompositeType}};
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleItem {
+    #[brw(magic = 0u8)]
     Module(Module),
+    #[brw(magic = 1u8)]
     TType(CompositeType),
+    #[brw(magic = 2u8)]
     Function(Function),
 }
 
@@ -39,8 +43,13 @@ impl Debug for ModuleItem {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Module {
+    #[bw(calc = self.items.len() as u64)]
+    len: u64,
+    #[br(count = len, map = |items: Vec<(Ident, ModuleItem)>| BTreeMap::from_iter(items.into_iter()))]
+    #[bw(map = |items| Vec::<(Ident, ModuleItem)>::from_iter(items.clone().into_iter()))]
     items: BTreeMap<Ident, ModuleItem>,
 }
 
@@ -90,12 +99,12 @@ impl Module {
     }
 
     /// Add an item to the module, returns true if successful, false if already exists.
-    pub fn add(&mut self, ident: Ident, item: impl Into<ModuleItem>) -> Result<(), IdentTaken> {
+    pub fn insert(&mut self, ident: Ident, item: impl Into<ModuleItem>) -> bool {
         if self.items.contains_key(&ident) {
-            Err(IdentTaken(ident))
+            false
         } else {
             self.items.insert(ident, item.into());
-            Ok(())
+            true
         }
     }
 }

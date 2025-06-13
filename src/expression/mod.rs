@@ -1,8 +1,8 @@
-use std::fmt::{Debug, Display};
+use std::{fmt::{Debug, Display}, sync::{Arc, Mutex}};
 
 use codb_core::NestedIdent;
 
-use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, typesystem::{scope::{ScopeTypes, ScopeValues}, value::Value, TypeError}};
+use crate::{db::{pager::Pager, registry::{Registry, TTypeId}, DbRelationSet}, typesystem::{scope::{ScopeTypes, ScopeValues}, value::Value, TypeError}};
 
 mod logical_op;
 mod arithmetic_op;
@@ -24,13 +24,20 @@ pub enum EvalError {
     UserPanic(String),
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Expression {
+    #[brw(magic = 0u8)]
     NestedIdent(NestedIdent),
+    #[brw(magic = 1u8)]
     Literal(Literal),
+    #[brw(magic = 2u8)]
     Op(Box<Op>),
+    #[brw(magic = 3u8)]
     ControlFlow(Box<ControlFlow>),
+    #[brw(magic = 4u8)]
     FunctionInvocation(FunctionInvocation),
+    #[brw(magic = 5u8)]
     Action(InterpreterAction),
 }
 
@@ -48,32 +55,36 @@ impl Debug for Expression {
 }
 
 impl Expression {
-    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
             Expression::NestedIdent(nested_ident) => scopes.get_nested(registry, nested_ident),
-            Expression::Literal(literal) => literal.eval_types(registry, relations, scopes),
-            Expression::Op(op) => op.eval_types(registry, relations, scopes),
-            Expression::ControlFlow(control_flow) => control_flow.eval_types(registry, relations, scopes),
-            Expression::FunctionInvocation(function) => function.eval_types(registry, relations, scopes),
-            Expression::Action(action) => action.eval_types(registry, relations, scopes),
+            Expression::Literal(literal) => literal.eval_types(pager, registry, relations, scopes),
+            Expression::Op(op) => op.eval_types(pager, registry, relations, scopes),
+            Expression::ControlFlow(control_flow) => control_flow.eval_types(pager, registry, relations, scopes),
+            Expression::FunctionInvocation(function) => function.eval_types(pager, registry, relations, scopes),
+            Expression::Action(action) => action.eval_types(pager, registry, relations, scopes),
         }
     }
 
-    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
-            Expression::NestedIdent(nested_ident) => Ok(scopes.get_nested(nested_ident).expect("could not access nested value on scope")),
-            Expression::Literal(literal) => literal.eval(registry, relations, scopes),
-            Expression::Op(op) => op.eval(registry, relations, scopes),
-            Expression::ControlFlow(cf) => cf.eval(registry, relations, scopes),
-            Expression::FunctionInvocation(function) => function.eval(registry, relations, scopes),
-            Expression::Action(action) => action.eval(registry, relations, scopes),
+            // this was a user error in eval_types and db error here because it should have been caught there
+            Expression::NestedIdent(nested_ident) => Ok(scopes.get_nested(nested_ident).expect("scope should have been checked")),
+            Expression::Literal(literal) => literal.eval(pager, registry, relations, scopes),
+            Expression::Op(op) => op.eval(pager, registry, relations, scopes),
+            Expression::ControlFlow(cf) => cf.eval(pager, registry, relations, scopes),
+            Expression::FunctionInvocation(function) => function.eval(pager, registry, relations, scopes),
+            Expression::Action(action) => action.eval(pager, registry, relations, scopes),
         }
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Op {
+    #[brw(magic = 0u8)]
     Logical(LogicalOp),
+    #[brw(magic = 1u8)]
     Arithmetic(ArithmeticOp),
 }
 
@@ -87,17 +98,17 @@ impl Debug for Op {
 }
 
 impl Op {
-    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
-            Op::Logical(op) => op.eval_types(registry, relations, scopes),
-            Op::Arithmetic(op) => op.eval_types(registry, relations, scopes),
+            Op::Logical(op) => op.eval_types(pager, registry, relations, scopes),
+            Op::Arithmetic(op) => op.eval_types(pager, registry, relations, scopes),
         }
     }
     
-    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
-            Op::Logical(op) => op.eval(registry, relations, scopes),
-            Op::Arithmetic(op) => op.eval(registry, relations, scopes),
+            Op::Logical(op) => op.eval(pager, registry, relations, scopes),
+            Op::Arithmetic(op) => op.eval(pager, registry, relations, scopes),
         }
     }
 }

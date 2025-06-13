@@ -1,15 +1,20 @@
-use std::{cmp::Ordering, collections::BTreeMap, fmt::{Debug, Display}};
+use std::{cmp::Ordering, fmt::{Debug, Display}, io};
 
 use codb_core::{Ident, IdentForest};
+use indexmap::IndexMap;
 
-use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, expression::{debug_db_array, debug_db_enum, debug_db_struct, StructLiteral}, typesystem::{ttype::{CompositeType, EnumType, StructType, TType}, TypeError}};
+use crate::{db::registry::{Registry, TTypeId}, expression::{debug_db_array, debug_db_enum, debug_db_struct}, typesystem::{ttype::{CompositeType, StructType, TType}, TypeError}};
 
-use super::{scope::ScopeTypes, ttype::ArrayType, TypeSet};
+use super::{ttype::ArrayType, TypeSet};
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Value {
+    #[brw(magic = 0u8)]
     Composite(CompositeValue),
+    #[brw(magic = 1u8)]
     Scalar(ScalarValue),
+    #[brw(magic = 2u8)]
     Array(ArrayValue),
 }
 
@@ -83,9 +88,12 @@ impl From<ArrayValue> for Value {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum CompositeValue {
+    #[brw(magic = 0u8)]
     Struct(StructValue),
+    #[brw(magic = 1u8)]
     Enum(EnumValue),
 }
 
@@ -147,21 +155,26 @@ impl TryFrom<Value> for CompositeValue {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StructValue {
     ttype_id: TTypeId,
-    fields: BTreeMap<Ident, Value>,
+    #[bw(calc = self.fields.len() as u64)]
+    len: u64,
+    #[br(count = len, map = |fields: Vec<(Ident, Value)>| IndexMap::from_iter(fields.into_iter()))]
+    #[bw(map = |fields| Vec::<(Ident, Value)>::from_iter(fields.clone().into_iter()))]
+    fields: IndexMap<Ident, Value>,
 }
 
 impl StructValue {
-    pub unsafe fn new_unchecked(ttype_id: TTypeId, fields: BTreeMap<Ident, Value>) -> StructValue {
+    pub unsafe fn new_unchecked(ttype_id: TTypeId, fields: IndexMap<Ident, Value>) -> StructValue {
         StructValue {
             ttype_id,
             fields,
         }
     }
 
-    pub fn fields(&self) -> &BTreeMap<Ident, Value> {
+    pub fn fields(&self) -> &IndexMap<Ident, Value> {
         &self.fields
     }
 
@@ -174,7 +187,7 @@ impl StructValue {
             return Ok(self.clone());
         }
 
-        let mut new_fields = BTreeMap::new();
+        let mut new_fields = IndexMap::new();
         
         for tree in ident_forest {
             let ident = tree.ident().clone();
@@ -265,6 +278,7 @@ impl TryFrom<CompositeValue> for StructValue {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnumValue {
     ttype_id: TTypeId,
@@ -412,13 +426,29 @@ impl Ord for EnumValue {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ScalarValue {
+    #[brw(magic = 1u8)]
     Unit,
-    Bool(bool),
+    #[brw(magic = 2u8)]
+    Bool(
+        #[br(try_map = |x: u8| if x == 1 { Ok(true) } else if x == 0 { Ok(false) } else { Err(io::ErrorKind::InvalidData) })]
+        #[bw(map = |x| *x as u8)]
+        bool
+    ),
+    #[brw(magic = 3u8)]
     Int32(i32),
+    #[brw(magic = 4u8)]
     Int64(i64),
-    String(String),
+    #[brw(magic = 5u8)]
+    String(
+        #[bw(calc = self_1.len() as u64)]
+        u64,
+        #[br(count = self_0, try_map = |bytes: Vec<u8>| String::from_utf8(bytes))]
+        #[bw(map = |string| string.as_bytes())]
+        String,
+    ),
 }
 
 impl ScalarValue {
@@ -476,9 +506,13 @@ impl TryFrom<Value> for ScalarValue {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArrayValue {
     ttype_id: TTypeId,
+    #[bw(calc = entries.len() as u64)]
+    len: u64,
+    #[br(count = len)]
     entries: Vec<Value>,
 }
 

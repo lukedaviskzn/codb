@@ -1,14 +1,14 @@
-use std::{borrow::Borrow, fmt::Display, iter::Peekable, ops::Bound};
+use std::{borrow::Borrow, fmt::Display, iter::Peekable, ops::Bound, sync::{Arc, Mutex}};
 
 use codb_core::{Ident, IdentForest, IdentPath, IdentTree, NestedIdent};
 use itertools::Itertools;
 
-use crate::{db::{registry::{CompositeTTypeId, Registry, TTypeId}, relation::Relation, DbRelations}, expression::{ArithmeticOp, ArrayLiteral, Branch, ControlFlow, EnumLiteral, Expression, FunctionInvocation, IfControlFlow, InterpreterAction, Literal, LogicalOp, MatchControlFlow, Op, StructLiteral}, query::lexer::TokenKind, typesystem::{function::{Function, FunctionArg}, ttype::{ArrayType, CompositeType, EnumType, ScalarType, StructType, TType}, value::ScalarValue, TypeError, TypeSet}};
+use crate::{db::{pager::Pager, registry::{CompositeTTypeId, Registry, TTypeId}, DbRelationSet}, expression::{ArithmeticOp, ArrayLiteral, Branch, ControlFlow, EnumLiteral, Expression, FunctionInvocation, IfControlFlow, InterpreterAction, Literal, LogicalOp, MatchControlFlow, Op, StructLiteral}, query::{lexer::TokenKind, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}}, typesystem::{function::{Function, FunctionArg}, ttype::{ArrayType, CompositeType, EnumType, ScalarType, StructType, TType}, value::ScalarValue, TypeError, TypeSet}};
 
 use super::{lexer::{Keyword, LexContext, LexError, LexErrorKind, Lexer, Symbol, Token, TokenTag}, Span};
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("[{span}] error while{}: {kind}", .context.as_ref().map(|ctx| format!(" {ctx}")).unwrap_or_default())]
+#[error("[{span}] error while{}: {kind}", .context.as_ref().map(|ctx| format!(" {ctx}")).unwrap_or(" parsing".into()))]
 pub struct ParseError {
     pub span: Span,
     pub context: Option<ParseContext>,
@@ -25,6 +25,8 @@ impl ParseError {
 #[derive(Debug, Clone)]
 pub enum ParseContext {
     LexContext(Option<LexContext>),
+    ParsingDataQuery,
+    ParsingSchemaQuery,
     ParsingExpression,
     ParsingIf,
     ParsingMatch,
@@ -58,6 +60,8 @@ impl Display for ParseContext {
                         Some(ctx) => Display::fmt(ctx, f),
                         None => write!(f, "tokenising"),
                     },
+            ParseContext::ParsingDataQuery => write!(f, "parsing data query"),
+            ParseContext::ParsingSchemaQuery => write!(f, "parsing schema query"),
             ParseContext::ParsingExpression => write!(f, "parsing expression"),
             ParseContext::ParsingIf => write!(f, "parsing if control flow"),
             ParseContext::ParsingMatch => write!(f, "parsing match control flow"),
@@ -94,47 +98,47 @@ pub enum ParseErrorKind {
     TypeError(#[from] TypeError),
     #[error("unexpected end of input")]
     UnexpectedEnd,
-    #[error("unexpected {0}")]
+    #[error("unexpected `{0}`")]
     UnexpectedTokenKind(TokenKind),
-    #[error("unexpected {0}")]
+    #[error("unexpected `{0}`")]
     UnexpectedTokenTag(TokenTag),
-    #[error("unexpected {got} expected one of {expected:?}")]
+    #[error("unexpected `{got}` expected one of `{expected:?}`")]
     ExpectedTokenKindOneOf {
         expected: Box<[TokenKind]>,
         got: TokenKind,
     },
-    #[error("expected {expected:?} got {got}")]
+    #[error("expected `{expected:?}` got `{got}`")]
     ExpectedTokenKind {
         expected: TokenKind,
         got: TokenKind,
     },
-    #[error("expected {expected:?} got {got}")]
+    #[error("expected `{expected:?}` got `{got}`")]
     ExpectedTokenTagGotKind {
         expected: TokenTag,
         got: TokenKind,
     },
-    #[error("expected {expected:?} got {got}")]
+    #[error("expected `{expected:?}` got `{got}`")]
     ExpectedTokenTag {
         expected: TokenTag,
         got: TokenTag,
     },
-    #[error("expected {expected:?} got {got}")]
+    #[error("expected `{expected:?}` got `{got}`")]
     ExpectedScalarLiteralType {
         expected: ScalarType,
         got: TokenKind,
     },
-    #[error("unexpected {got} expected one of {expected:?}")]
+    #[error("unexpected `{got}` expected one of `{expected:?}`")]
     ExpectedScalarLiteralTypeOneOf {
         expected: Box<[ScalarType]>,
         got: TokenKind,
     },
-    #[error("match branch has duplicate tag {0}")]
+    #[error("match branch has duplicate tag `{0}`")]
     DuplicateBranch(Ident),
-    #[error("struct type has duplicate field {0}")]
+    #[error("struct type has duplicate field `{0}`")]
     DuplicateField(Ident),
-    #[error("enum type has duplicate tag {0}")]
+    #[error("enum type has duplicate tag `{0}`")]
     DuplicateTag(Ident),
-    #[error("cannot create value of type 'never'")]
+    #[error("cannot create value of type `never`")]
     NeverValue,
 }
 
@@ -148,7 +152,7 @@ impl From<LexError> for ParseError {
     }
 }
 
-pub struct Parser<T: Iterator<Item = char>> {
+pub(crate) struct Parser<T: Iterator<Item = char>> {
     lexer: Peekable<Lexer<T>>,
 }
 
@@ -161,18 +165,72 @@ impl<T: Iterator<Item = char>> Parser<T> {
     }
 
     #[allow(unused)]
-    pub fn parse<R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>) -> Result<Expression, ParseError> {
-        self.parse_expression(registry, relations).map(|(_, expr)| expr)
+    pub fn parse_data_query(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet) -> Result<Expression, ParseError> {
+        let (_, expr) = self.parse_expression(pager, registry, relations)?;
+        
+        if let Some(token) = self.lexer.next() {
+            let token = token?;
+            return Err(ParseError {
+                span: token.span,
+                context: Some(ParseContext::ParsingDataQuery),
+                kind: ParseErrorKind::UnexpectedTokenKind(token.kind),
+            });
+        }
+
+        Ok(expr)
     }
 
-    pub fn parse_expression<R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>) -> Result<(Span, Expression), ParseError> {
-        let token = self.expect_token()?;
+    pub fn parse_schema_query(&mut self) -> Result<SchemaQuery, ParseError> {
+        let keyword_token = self.expect_token_tag(TokenTag::Keyword)?;
+        let TokenKind::Keyword(keyword) = keyword_token.kind else { unreachable!() };
+        
+        match keyword {
+            Keyword::Type => {
+                let (_, name) = self.parse_ident_path().map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                self.expect_symbol(Symbol::Equal)?;
+                let (_, ttype) = self.parse_composite_ttype().map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                Ok(SchemaQuery::Type(TypeSchemaQuery::Create {
+                    name,
+                    ttype,
+                }))
+            },
+            Keyword::Relation => {
+                let (_, name) = self.expect_ident()?;
+                self.expect_symbol(Symbol::Equal).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                let (_, ttype) = self.parse_struct_type()?;
+                
+                self.expect_symbol(Symbol::LessThan).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                let (_, pkey) = self.parse_ident_forest()?;
+                self.expect_symbol(Symbol::GreaterThan).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
 
-        let spanned_expression = match token.kind {
+                Ok(SchemaQuery::Relation(RelationSchemaQuery::Create {
+                    name,
+                    ttype,
+                    pkey,
+                }))
+            },
+            keyword => {
+                Err(ParseError {
+                    span: keyword_token.span,
+                    context: Some(ParseContext::ParsingSchemaQuery),
+                    kind: ParseErrorKind::ExpectedTokenKindOneOf {
+                        expected: [TokenKind::Keyword(Keyword::Type), TokenKind::Keyword(Keyword::Relation)].into(),
+                        got: TokenKind::Keyword(keyword),
+                    },
+                })
+            }
+        }
+    }
+
+    pub fn parse_expression(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet) -> Result<(Span, Expression), ParseError> {
+        let token = self.expect_peek()?;
+
+        let spanned_expression = match token.kind.clone() {
             // op (arithmetic)
             TokenKind::Symbol(Symbol::Plus) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -182,8 +240,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Symbol(Symbol::Minus) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -193,8 +252,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Symbol(Symbol::Asterisk) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -204,8 +264,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Symbol(Symbol::ForwardSlash) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -216,8 +277,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
             },
             // op (logical)
             TokenKind::Symbol(Symbol::And) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -227,8 +289,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Symbol(Symbol::Or) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -238,15 +301,17 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Symbol(Symbol::Not) => {
-                let (expr_span, expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (expr_span, expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(expr_span);
                 
                 (span, Expression::Op(Box::new(Op::Logical(LogicalOp::Not(expr)))))
             },
             TokenKind::Symbol(Symbol::DoubleEqual) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -256,8 +321,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Symbol(Symbol::LessThan) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -267,8 +333,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Symbol(Symbol::GreaterThan) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -278,8 +345,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Symbol(Symbol::LessThanOrEqual) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -289,8 +357,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Symbol(Symbol::GreaterThanOrEqual) => {
-                let (left_span, left_expr) = self.parse_expression(registry, relations)?;
-                let (right_span, right_expr) = self.parse_expression(registry, relations)?;
+                let token = self.expect_token()?;
+                let (left_span, left_expr) = self.parse_expression(pager.clone(), registry, relations)?;
+                let (right_span, right_expr) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 let span = token.span.merge(left_span).merge(right_span);
                 
@@ -300,17 +369,18 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 )))))
             },
             TokenKind::Keyword(Keyword::If) => {
+                let token = self.expect_token()?;
                 // if condition { then } else { otherwise } -> ret_type
-                let (condition_span, condition) = self.parse_expression(registry, relations)?;
+                let (condition_span, condition) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingIf))?;
-                let (then_span, then) = self.parse_expression(registry, relations)?;
+                let (then_span, then) = self.parse_expression(pager.clone(), registry, relations)?;
                 self.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingIf))?;
                 
                 self.expect_keyword(Keyword::Else).map_err(|err| err.with_context(ParseContext::ParsingIf))?;
                 
                 self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingIf))?;
-                let (otherwise_span, otherwise) = self.parse_expression(registry, relations)?;
+                let (otherwise_span, otherwise) = self.parse_expression(pager.clone(), registry, relations)?;
                 self.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingIf))?;
 
                 self.expect_symbol(Symbol::RightArrow).map_err(|err| err.with_context(ParseContext::ParsingIf))?;
@@ -330,12 +400,13 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 }))))
             },
             TokenKind::Keyword(Keyword::Match) => {
+                let token = self.expect_token()?;
                 // match param { Tag(tag) => expr, ... } -> ret_type
-                let (param_span, param) = self.parse_expression(registry, relations)?;
+                let (param_span, param) = self.parse_expression(pager.clone(), registry, relations)?;
 
                 self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingMatch))?;
 
-                let (all_branches_span, branch_list) = self.parse_non_empty_list_with_rel_args(registry, relations, Self::parse_branch, &TokenKind::Symbol(Symbol::Comma))?;
+                let (all_branches_span, branch_list) = self.parse_non_empty_list_with_rel_args(pager.clone(), registry, relations, Self::parse_branch, &TokenKind::Symbol(Symbol::Comma))?;
 
                 let mut branches = btreemap! {};
 
@@ -367,6 +438,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 }))))
             },
             TokenKind::Symbol(Symbol::Hash) => {
+                let token = self.expect_token()?;
                 let (_, relation) = self.expect_ident().map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
                 self.expect_symbol(Symbol::Dot).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
@@ -382,9 +454,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
                         self.expect_symbol(Symbol::GreaterThan).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
                         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (start_span, start) = self.parse_expression(registry, relations)?;
+                        let (start_span, start) = self.parse_expression(pager.clone(), registry, relations)?;
                         self.expect_symbol(Symbol::Comma).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (end_span, end) = self.parse_expression(registry, relations)?;
+                        let (end_span, end) = self.parse_expression(pager.clone(), registry, relations)?;
                         self.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
                         let mut span = token.span
@@ -402,7 +474,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
                     },
                     "insert" => {
                         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (row_span, new_row) = self.parse_expression(registry, relations)?;
+                        let (row_span, new_row) = self.parse_expression(pager.clone(), registry, relations)?;
                         self.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
                         let span = token.span
@@ -416,7 +488,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
                     },
                     "extend" => {
                         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (row_span, new_rows) = self.parse_expression(registry, relations)?;
+                        let (row_span, new_rows) = self.parse_expression(pager.clone(), registry, relations)?;
                         self.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
                         let span = token.span
@@ -430,7 +502,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
                     },
                     "remove" => {
                         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (row_span, pkey) = self.parse_expression(registry, relations)?;
+                        let (row_span, pkey) = self.parse_expression(pager.clone(), registry, relations)?;
                         self.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
                         let span = token.span
@@ -444,7 +516,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
                     },
                     "retain" => {
                         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (function_span, function) = self.parse_function(registry, relations)?;
+                        let (function_span, function) = self.parse_function(pager.clone(), registry, relations)?;
                         self.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
                         let span = token.span
@@ -476,6 +548,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
             }
             // function invocation or nested ident
             TokenKind::Ident(ident) => {
+                let token = self.expect_token()?;
                 let mut idents = vec![ident];
 
                 let next_token = self.lexer.peek();
@@ -491,7 +564,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
 
                         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingFunctionInvocation))?;
                         let (arg_list_span, args) = self.parse_non_empty_list_with_rel_args(
-                            registry, relations,
+                            pager, registry, relations,
                             Self::parse_expression,
                             &TokenKind::Symbol(Symbol::Comma)
                         )?;
@@ -508,7 +581,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
                     },
                     Some(Ok(Token { kind: TokenKind::Symbol(Symbol::BracketOpen), .. })) => {
                         let (arg_list_span, args) = self.parse_non_empty_list_with_rel_args(
-                            registry, relations,
+                            pager, registry, relations,
                             Self::parse_expression,
                             &TokenKind::Symbol(Symbol::Comma)
                         )?;
@@ -545,15 +618,10 @@ impl<T: Iterator<Item = char>> Parser<T> {
                     },
                 }
             }
-            TokenKind::Symbol(Symbol::PathSep) => { // todo: fix this symbol
-                let (span, value) = self.parse_literal(registry, relations)?;
+            _ => {
+                let (span, value) = self.parse_literal(pager, registry, relations).map_err(|err| err.with_context(ParseContext::ParsingExpression))?;
                 (span, Expression::Literal(value))
             },
-            kind => return Err(ParseError {
-                span: token.span,
-                context: Some(ParseContext::ParsingExpression),
-                kind: ParseErrorKind::UnexpectedTokenKind(kind),
-            }),
         };
 
         Ok(spanned_expression)
@@ -611,7 +679,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
         Ok((forest_span, IdentTree::new(ident, forest)))
     }
 
-    pub fn parse_function<R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>) -> Result<(Span, Function), ParseError> {
+    pub fn parse_function(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet) -> Result<(Span, Function), ParseError> {
         // (args, ...)
         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingFunction))?;
         let (arg_span, args) = self.parse_non_empty_list(Self::parse_function_arg, &TokenKind::Symbol(Symbol::Comma))?;
@@ -624,7 +692,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
         
         // { expression }
         self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingFunction))?;
-        let (expr_span, expression) = self.parse_expression(registry, relations)?;
+        let (expr_span, expression) = self.parse_expression(pager.clone(), registry, relations)?;
         self.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingFunction))?;
 
         let span = arg_span
@@ -633,7 +701,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
             .extend(Some(1))
             .prepend(Some(1));
 
-        let function = Function::new(registry, relations, args, result_ttype_id, expression).map_err(|err| ParseError {
+        let function = Function::new(pager, registry, relations, args, result_ttype_id, expression).map_err(|err| ParseError {
             span,
             context: Some(ParseContext::ParsingFunction),
             kind: err.into(),
@@ -652,20 +720,20 @@ impl<T: Iterator<Item = char>> Parser<T> {
         Ok((span, FunctionArg::new(ident, ttype_id)))
     }
 
-    pub fn parse_branch<R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>) -> Result<(Span, (Ident, Branch)), ParseError> {
+    pub fn parse_branch(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet) -> Result<(Span, (Ident, Branch)), ParseError> {
         let (tag_span, tag) = self.expect_ident().map_err(|err| err.with_context(ParseContext::ParsingBranch))?;
         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingBranch))?;
         let (ident_span, ident) = self.expect_ident().map_err(|err| err.with_context(ParseContext::ParsingBranch))?;
         self.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingBranch))?;
         self.expect_symbol(Symbol::RightFatArrow).map_err(|err| err.with_context(ParseContext::ParsingBranch))?;
-        let (expr_span, expression) = self.parse_expression(registry, relations)?;
+        let (expr_span, expression) = self.parse_expression(pager, registry, relations)?;
 
         let span = tag_span.merge(ident_span).merge(expr_span);
 
         Ok((span, (tag, Branch::new(ident, expression))))
     }
 
-    pub fn parse_literal<R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>) -> Result<(Span, Literal), ParseError> {
+    pub fn parse_literal(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet) -> Result<(Span, Literal), ParseError> {
         let next_peek = self.expect_peek()
             .map_err(|err| err.with_context(ParseContext::ParsingLiteral))?
             .clone();
@@ -733,18 +801,18 @@ impl<T: Iterator<Item = char>> Parser<T> {
                         }.into(),
                     }),
                     TType::Composite(CompositeType::Struct(_)) => {
-                        let (struct_span, struct_value) = self.parse_struct_contents(registry, relations, ttype_id)?;
+                        let (struct_span, struct_value) = self.parse_struct_contents(pager, registry, relations, ttype_id)?;
                         (type_span.merge(struct_span), struct_value.into())
                     },
                     TType::Composite(CompositeType::Enum(_)) => {
                         self.expect_symbol(Symbol::Hash).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
-                        let (struct_span, struct_value) = self.parse_enum_contents(registry, relations, ttype_id)?;
+                        let (struct_span, struct_value) = self.parse_enum_contents(pager, registry, relations, ttype_id)?;
                         (type_span.merge(struct_span), struct_value.into())
                     },
                     TType::Array(_) => {
                         self.expect_symbol(Symbol::SquareBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingArrayLiteral))?;
 
-                        let (list_span, entries) = self.parse_non_empty_list_with_rel_args(registry, relations, Self::parse_expression, &TokenKind::Symbol(Symbol::Comma))?;
+                        let (list_span, entries) = self.parse_non_empty_list_with_rel_args(pager, registry, relations, Self::parse_expression, &TokenKind::Symbol(Symbol::Comma))?;
                         let entries = entries.into_iter().map(|(_, value)| value).collect_vec();
 
                         self.expect_symbol(Symbol::SquareBracketClose).map_err(|err| err.with_context(ParseContext::ParsingArrayLiteral))?;
@@ -762,11 +830,11 @@ impl<T: Iterator<Item = char>> Parser<T> {
         Ok(spanned_value)
     }
 
-    pub fn parse_struct_contents<R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>, ttype_id: TTypeId) -> Result<(Span, StructLiteral), ParseError> {
+    pub fn parse_struct_contents(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, ttype_id: TTypeId) -> Result<(Span, StructLiteral), ParseError> {
         self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingStructLiteral))?;
         
         let (list_span, field_list) = self.parse_non_empty_list_with_rel_args(
-            registry, relations,
+            pager, registry, relations,
             Self::parse_field_value,
             &TokenKind::Symbol(Symbol::Comma)
         )?;
@@ -793,29 +861,29 @@ impl<T: Iterator<Item = char>> Parser<T> {
         Ok((span, struct_value))
     }
 
-    pub fn parse_enum_contents<R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>, ttype_id: TTypeId) -> Result<(Span, EnumLiteral), ParseError> {
-        let (span, (tag, value)) = self.parse_tag_value(registry, relations)?;
+    pub fn parse_enum_contents(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, ttype_id: TTypeId) -> Result<(Span, EnumLiteral), ParseError> {
+        let (span, (tag, value)) = self.parse_tag_value(pager, registry, relations)?;
         
         let enum_value = EnumLiteral::new(ttype_id, tag, value);
         
         Ok((span, enum_value))
     }
 
-    pub fn parse_field_value<R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>) -> Result<(Span, (Ident, Expression)), ParseError> {
+    pub fn parse_field_value(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet) -> Result<(Span, (Ident, Expression)), ParseError> {
         let (ident_span, ident) = self.expect_ident().map_err(|err| err.with_context(ParseContext::ParsingStructLiteral))?;
         self.expect_symbol(Symbol::Colon).map_err(|err| err.with_context(ParseContext::ParsingStructLiteral))?;
-        let (value_span, value) = self.parse_expression(registry, relations)?;
+        let (value_span, value) = self.parse_expression(pager, registry, relations)?;
 
         let span = ident_span.merge(value_span);
 
         Ok((span, (ident, value)))
     }
 
-    pub fn parse_tag_value<R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>) -> Result<(Span, (Ident, Expression)), ParseError> {
+    pub fn parse_tag_value(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet) -> Result<(Span, (Ident, Expression)), ParseError> {
         let (ident_span, ident) = self.expect_ident().map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
         
         self.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
-        let (value_span, value) = self.parse_expression(registry, relations)?;
+        let (value_span, value) = self.parse_expression(pager, registry, relations)?;
         self.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
 
         let span = ident_span.merge(value_span).extend(Some(1));
@@ -823,9 +891,9 @@ impl<T: Iterator<Item = char>> Parser<T> {
         Ok((span, (ident, value)))
     }
 
-    pub fn parse_composite_ttype_id(&mut self) -> Result<(Span, CompositeType), ParseError> {
-        let token = self.expect_token().map_err(|err| err.with_context(ParseContext::ParsingCompositeTTypeId))?;
-        match token.kind {
+    pub fn parse_composite_ttype(&mut self) -> Result<(Span, CompositeType), ParseError> {
+        let token = self.expect_peek().map_err(|err| err.with_context(ParseContext::ParsingCompositeTTypeId))?;
+        match &token.kind {
             TokenKind::Keyword(Keyword::Struct) => {
                 let (struct_type_span, struct_type) = self.parse_struct_type()?;
                 Ok((struct_type_span, CompositeType::Struct(struct_type)))
@@ -842,13 +910,14 @@ impl<T: Iterator<Item = char>> Parser<T> {
                         TokenKind::Keyword(Keyword::Struct),
                         TokenKind::Keyword(Keyword::Enum),
                     ].into(),
-                    got: kind,
+                    got: kind.clone(),
                 },
             })
         }
     }
 
     pub fn parse_struct_type(&mut self) -> Result<(Span, StructType), ParseError> {
+        self.expect_keyword(Keyword::Struct).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
         self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
         
         let (field_list_span, field_list) = self.parse_non_empty_list(Self::parse_field, &TokenKind::Symbol(Symbol::Comma))?;
@@ -875,6 +944,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
     }
 
     pub fn parse_enum_type(&mut self) -> Result<(Span, EnumType), ParseError> {
+        self.expect_keyword(Keyword::Enum).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
         self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
         let (tag_list_span, tag_list) = self.parse_non_empty_list(Self::parse_tag, &TokenKind::Symbol(Symbol::Comma))?;
         let tag_list = tag_list.into_iter()
@@ -923,16 +993,17 @@ impl<T: Iterator<Item = char>> Parser<T> {
     }
 
     pub fn parse_ttype_id(&mut self) -> Result<(Span, TTypeId), ParseError> {
-        let token = self.expect_token().map_err(|err| err.with_context(ParseContext::ParsingTTypeId))?;
+        let token = self.expect_peek()
+            .map_err(|err| err.with_context(ParseContext::ParsingTTypeId))?
+            .clone();
 
         let spanned_ttype_id = match token.kind {
             TokenKind::ScalarType(scalar_type) => {
+                self.expect_token()?;
                 (token.span, TTypeId::Scalar(scalar_type))
             },
-            TokenKind::Keyword(Keyword::Anon) => {
-                self.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAnonymousType))?;
-                let (type_span, composite_type) = self.parse_composite_ttype_id()?;
-                self.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingAnonymousType))?;
+            TokenKind::Keyword(Keyword::Struct | Keyword::Enum) => {
+                let (type_span, composite_type) = self.parse_composite_ttype()?;
 
                 let span = token.span
                     .merge(type_span)
@@ -942,6 +1013,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 (span, TTypeId::Composite(CompositeTTypeId::Anonymous(Box::new(composite_type))))
             },
             TokenKind::Ident(ident) => {
+                self.expect_token()?;
                 let mut idents = vec![ident];
 
                 let mut span = token.span;
@@ -960,6 +1032,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
                 (span, TTypeId::Composite(CompositeTTypeId::Path(path)))
             },
             TokenKind::Symbol(Symbol::SquareBracketOpen) => {
+                self.expect_token()?;
                 let length = if let Some(Token { kind: TokenKind::ScalarLiteral(ScalarValue::Int64(length)), .. }) = self.next_if_token_tag(TokenTag::ScalarLiteral)? {
                     Some(length as u64)
                 } else {
@@ -985,7 +1058,7 @@ impl<T: Iterator<Item = char>> Parser<T> {
         Ok(spanned_ttype_id)
     }
 
-    pub fn parse_non_empty_list<I>(&mut self, parse_item: impl Fn(&mut Parser<T>) -> Result<(Span, I), ParseError>, separator: &TokenKind) -> Result<(Span, Box<[(Span, I)]>), ParseError> {
+    pub fn parse_non_empty_list<I>(&mut self, mut parse_item: impl FnMut(&mut Parser<T>) -> Result<(Span, I), ParseError>, separator: &TokenKind) -> Result<(Span, Box<[(Span, I)]>), ParseError> {
         let (mut span, item) = parse_item(self)?;
         let mut items = vec![(span, item)];
 
@@ -999,8 +1072,8 @@ impl<T: Iterator<Item = char>> Parser<T> {
         Ok((span, items.into()))
     }
     
-    pub fn parse_non_empty_list_with_rel_args<I, R: Relation>(&mut self, registry: &Registry, relations: &DbRelations<R>, parse_item: impl Fn(&mut Parser<T>, &Registry, &DbRelations<R>) -> Result<(Span, I), ParseError>, separator: &TokenKind) -> Result<(Span, Box<[(Span, I)]>), ParseError> {
-        Self::parse_non_empty_list(self, |parser| parse_item(parser, registry, relations), separator)
+    pub fn parse_non_empty_list_with_rel_args<I>(&mut self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, mut parse_item: impl FnMut(&mut Parser<T>, Arc<Mutex<Pager>>, &Registry, &DbRelationSet) -> Result<(Span, I), ParseError>, separator: &TokenKind) -> Result<(Span, Box<[(Span, I)]>), ParseError> {
+        Self::parse_non_empty_list(self, |parser| parse_item(parser, pager.clone(), registry, relations), separator)
     }
     
     pub fn expect_token(&mut self) -> Result<Token, ParseError> {
@@ -1160,39 +1233,40 @@ impl<T: Iterator<Item = char>> Parser<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Bound;
+    use std::{ops::Bound, sync::{Arc, Mutex}};
 
-    use crate::{db::{registry::Registry, relation::memory::MemoryRelation, DbRelations}, expression::{ArrayLiteral, Expression, Literal}, query::lexer::Lexer};
+    use crate::{db::{pager::Pager, registry::Registry, DbRelationSet}, query::lexer::Lexer};
 
     use super::Parser;
 
     #[test]
     fn test() {
         let string = "
-        ::[]anon{struct { active: bool, id: int32, name: string }} [
-            ::anon{struct { active: bool, id: int32, name: string }} {
-                active: ::false,
-                id: ::-1_i32,
-                name: ::\"El Jones, Jim\"
+        []struct { active: bool, id: int32, name: string } [
+            struct { active: bool, id: int32, name: string } {
+                active: false,
+                id: - 0i32 1_i32, // 0 - 1 instead of just -1 as negation operator isn't finished
+                name: \"El Jones, Jim\"
             },
-            ::anon{struct { active: bool, id: int32, name: string }} {
-                active: ::true,
-                id: ::1_i32,
-                name: ::\"Jim Jones\"
+            struct { active: bool, id: int32, name: string } {
+                active: true,
+                id: 1_i32,
+                name: \"Jim Jones\"
             },
-            ::anon{struct { active: bool, id: int32, name: string }} {
-                active: ::true,
-                id: ::2_i32,
-                name: ::\"Jimboni Jonesi\"
+            struct { active: bool, id: int32, name: string } {
+                active: true,
+                id: 2_i32,
+                name: \"Jimboni Jonesi\"
             }
         ]";
 
-        let relations = DbRelations::<MemoryRelation>::new();
-        let registry = Registry::new(&relations);
+        let pager = Arc::new(Mutex::new(Pager::new_memory()));
+        let relations = DbRelationSet::new();
+        let registry = Registry::new(pager.clone(), &relations);
 
         let lexer = Lexer::new(string.chars());
         let mut parser = Parser::new(lexer);
-        match parser.parse_expression(&registry, &relations) {
+        match parser.parse_expression(pager, &registry, &relations) {
             Ok((_, expr)) => {
                 // i aint writing a test for this
                 dbg!(expr);

@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+binrw = "0.15.0"
 codb-core = { version = "0.1.0", path = "codb-core" }
 codb-macro = { version = "0.1.0", path = "codb-macro" }
 either = "1.15.0"
+fs4 = "0.13.1"
 indexmap = { version = "2.9.0", features = ["serde"] }
 itertools = "0.14.0"
 maplit = "1.0.2"

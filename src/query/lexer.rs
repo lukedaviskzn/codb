@@ -7,7 +7,7 @@ use crate::typesystem::{ttype::ScalarType, value::ScalarValue};
 use super::Span;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("[{span}] error while{}: {kind}", .context.as_ref().map(|ctx| format!(" {ctx}")).unwrap_or_default())]
+#[error("[{span}] error while{}: {kind}", .context.as_ref().map(|ctx| format!(" {ctx}")).unwrap_or(" tokenising".into()))]
 pub struct LexError {
     pub span: Span,
     pub context: Option<LexContext>,
@@ -42,16 +42,16 @@ impl Display for LexContext {
 pub enum LexErrorKind {
     #[error("unexpected end of input")]
     UnexpectedEnd,
-    #[error("unexpected char {0:?}")]
+    #[error("unexpected char `{0:?}`")]
     UnexpectedChar(char),
-    #[error("expected char {expected:?} got {got:?}")]
+    #[error("expected char `{expected:?}` got `{got:?}`")]
     ExpectedChar {
         expected: char,
         got: char,
     },
     #[error("{0:#x} is not a valid unicode character")]
     NotUnicode(u32),
-    #[error("no such type '{0}-bit integer'")]
+    #[error("no such type `{0}-bit integer`")]
     IntegerBits(u8),
     #[error("{0}")]
     ParseIntError(#[from] ParseIntError),
@@ -134,9 +134,10 @@ pub enum Keyword {
     If,
     Else,
     Match,
-    Anon,
     Struct,
     Enum,
+    Type,
+    Relation,
 }
 
 impl Display for Keyword {
@@ -145,9 +146,10 @@ impl Display for Keyword {
             Keyword::If => write!(f, "if"),
             Keyword::Else => write!(f, "else"),
             Keyword::Match => write!(f, "match"),
-            Keyword::Anon => write!(f, "anon"),
             Keyword::Struct => write!(f, "struct"),
             Keyword::Enum => write!(f, "enum"),
+            Keyword::Type => write!(f, "type"),
+            Keyword::Relation => write!(f, "relation"),
         }
     }
 }
@@ -228,7 +230,7 @@ impl Debug for Symbol {
     }
 }
 
-pub struct Lexer<T: Iterator<Item = char>> {
+pub(crate) struct Lexer<T: Iterator<Item = char>> {
     chars: Peekable<Enumerate<T>>,
 }
 
@@ -269,15 +271,37 @@ impl<T: Iterator<Item = char>> Iterator for Lexer<T> {
     type Item = Result<Token, LexError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (mut index, mut next_char) = self.chars.next()?;
+        let (index, next_char) = self.chars.next()?;
         
         // whitespace
         if next_char.is_whitespace() {
             // consume all whitespace
             while let Some(_) = self.chars.next_if(|(_, c)| c.is_whitespace()) {}
-            let (i, c) = self.chars.next()?;
-            index = i;
-            next_char = c;
+            return self.next();
+        }
+
+        if next_char == '/' {
+            if let Some((_, char_after)) = self.chars.peek() {
+                if *char_after == '/' {
+                    // consume all chars until new line
+                    while let Some(_) = self.chars.next_if(|(_, c)| *c != '\n') {}
+                    return self.next();
+                } else if *char_after == '*' {
+                    let mut nesting = 1;
+                    // consume all chars until */
+                    while let Some((_, first)) = self.chars.next() {
+                        if nesting <= 0 {
+                            break;
+                        }
+                        if first == '*' {
+                            if let Some((_, '/')) = self.chars.peek() {
+                                nesting -= 1;
+                            }
+                        }
+                    }
+                    return self.next();
+                }
+            }
         }
 
         let (index, next_char) = (index, next_char);
@@ -287,7 +311,7 @@ impl<T: Iterator<Item = char>> Iterator for Lexer<T> {
         // identifiers
         if next_char.is_alphabetic() || next_char == '_' {
             let mut ident = String::from(next_char);
-            let mut ident_len = 0;
+            let mut ident_len = 1;
 
             while let Some((_, char)) = self.chars.next_if(|(_, c)| c.is_alphanumeric() || *c == '_') {
                 ident.push(char);
@@ -302,12 +326,14 @@ impl<T: Iterator<Item = char>> Iterator for Lexer<T> {
                 kind = TokenKind::Keyword(Keyword::Else);
             } else if ident == "match" {
                 kind = TokenKind::Keyword(Keyword::Match);
-            } else if ident == "anon" {
-                kind = TokenKind::Keyword(Keyword::Anon);
             } else if ident == "struct" {
                 kind = TokenKind::Keyword(Keyword::Struct);
             } else if ident == "enum" {
                 kind = TokenKind::Keyword(Keyword::Enum);
+            } else if ident == "type" {
+                kind = TokenKind::Keyword(Keyword::Type);
+            } else if ident == "relation" {
+                kind = TokenKind::Keyword(Keyword::Relation);
             } else if ident == "unit" {
                 kind = TokenKind::ScalarLiteral(ScalarValue::Unit);
             } else if ident == "true" {
@@ -433,7 +459,7 @@ impl<T: Iterator<Item = char>> Iterator for Lexer<T> {
                     '\'' => '\'',
                     '"' => '"',
                     'x' => {
-                        let (index, first_char) = match self.expect_next() {
+                        let (_, first_char) = match self.expect_next() {
                             Ok(next) => next,
                             Err(err) => return Some(Err(err.with_context(LexContext::LexingString))),
                         };
@@ -763,8 +789,8 @@ mod tests {
             T::Symbol(
                 S::BracketOpen,
             ),
-            T::Keyword(
-                K::Anon
+            T::Ident(
+                id!("anon")
             ),
             T::Symbol(
                 S::SquareBracketOpen,
@@ -826,8 +852,8 @@ mod tests {
             T::Symbol(
                 S::SquareBracketOpen,
             ),
-            T::Keyword(
-                K::Anon
+            T::Ident(
+                id!("anon")
             ),
             T::Symbol(
                 S::SquareBracketOpen,
@@ -925,8 +951,8 @@ mod tests {
             T::Symbol(
                 S::Comma,
             ),
-            T::Keyword(
-                K::Anon
+            T::Ident(
+                id!("anon")
             ),
             T::Symbol(
                 S::SquareBracketOpen,
@@ -1021,8 +1047,8 @@ mod tests {
             T::Symbol(
                 S::Comma,
             ),
-            T::Keyword(
-                K::Anon
+            T::Ident(
+                id!("anon")
             ),
             T::Symbol(
                 S::SquareBracketOpen,

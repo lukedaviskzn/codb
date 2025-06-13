@@ -43,3 +43,17 @@ pub fn id_path(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
     }.into()
 }
+
+#[proc_macro]
+pub fn parse_u8(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = syn::parse::<LitStr>(input).expect("parameter not a string literal");
+    let value = input.value();
+    let _ = u8::from_str(&value).expect("parameter is not a valid u8");
+    
+    quote::quote! {
+        {
+            use core::str::FromStr;
+            codb_core::Ident::from_str(#input).expect("unreachable")
+        }
+    }.into()
+}

@@ -2,21 +2,35 @@ use std::ops::RangeBounds;
 
 use codb_core::IdentForest;
 
-use crate::{db::registry::{Registry, TTypeId}, typesystem::{function::Function, ttype::StructType, value::StructValue, TypeError}};
+use crate::{db::registry::{Registry, TTypeId}, query::schema_query::SchemaError, typesystem::{ttype::StructType, value::StructValue, TypeError}};
 
 pub mod memory;
-pub mod file;
 
 pub type Key = StructValue;
 pub type Row = StructValue;
 pub type RowSize = u64;
 
-pub trait RelationRef {
-    fn schema(&self) -> &Schema;
+pub trait Relation {
+    fn schema(&self) -> Schema;
     fn range(&self, registry: &Registry, ident_forest: &IdentForest, range: impl RangeBounds<Key>) -> impl Iterator<Item = Row>;
+    fn insert(&mut self, registry: &Registry, new_row: Row) -> bool;
+    
+    #[allow(unused)]
+    fn extend(&mut self, registry: &Registry, new_rows: impl IntoIterator<Item = Row>) -> RowSize {
+        let mut count = 0;
+        for new_row in new_rows {
+            if self.insert(registry, new_row) {
+                count += 1;
+            }
+        }
+        count
+    }
+    
+    fn remove(&mut self, registry: &Registry, pkey: &Key) -> Option<Row>;
+    fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> RowSize;
     
     #[cfg(test)]
-    fn eq(&self, registry: &Registry, other: &impl RelationRef) -> bool {
+    fn eq(&self, registry: &Registry, other: &impl Relation) -> bool {
         use itertools::Itertools;
 
         if self.schema() != other.schema() {
@@ -59,30 +73,7 @@ pub trait RelationRef {
     }
 }
 
-pub trait Relation: RelationRef {
-    fn insert(&mut self, registry: &Registry, new_row: Row) -> bool;
-    
-    #[allow(unused)]
-    fn extend(&mut self, registry: &Registry, new_rows: impl IntoIterator<Item = Row>) -> RowSize {
-        let mut count = 0;
-        for new_row in new_rows {
-            if self.insert(registry, new_row) {
-                count += 1;
-            }
-        }
-        count
-    }
-    
-    fn remove(&mut self, registry: &Registry, pkey: &Key) -> Option<Row>;
-    fn retain(&mut self, predicate: impl Fn(&Row) -> bool) -> RowSize;
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum SchemaError {
-    #[error("cannot make primary key: {0}")]
-    PrimaryKeyInvalid(TypeError),
-}
-
+#[binrw]
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Schema {
     ttype: StructType,

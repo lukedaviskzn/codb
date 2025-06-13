@@ -1,26 +1,30 @@
-use std::{collections::HashSet, fmt::Debug};
+use std::{collections::HashSet, fmt::Debug, sync::{Arc, Mutex}};
 
 use codb_core::IdentPath;
 
-use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, typesystem::{scope::{ScopeTypes, ScopeValues}, value::Value, TypeError}};
+use crate::{db::{pager::Pager, registry::{Registry, TTypeId}, DbRelationSet}, typesystem::{scope::{ScopeTypes, ScopeValues}, value::Value, TypeError}};
 
 use super::{EvalError, Expression};
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FunctionInvocation {
     function: IdentPath,
-    args: Box<[Expression]>,
+    #[bw(calc = args.len() as u64)]
+    args_len: u64,
+    #[br(count = args_len)]
+    args: Vec<Expression>,
 }
 
 impl FunctionInvocation {
-    pub fn new(function: IdentPath, args: impl Into<Box<[Expression]>>) -> FunctionInvocation {
+    pub fn new(function: IdentPath, args: impl Into<Vec<Expression>>) -> FunctionInvocation {
         FunctionInvocation {
             function,
             args: args.into(),
         }
     }
 
-    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         let function = registry.function(&self.function)
             .ok_or_else(|| TypeError::FunctionNotFound(self.function.clone()))?;
 
@@ -36,29 +40,29 @@ impl FunctionInvocation {
         let mut arg_names = HashSet::new();
 
         for (arg, expression) in function.args().iter().zip(self.args.iter()) {
-            let expression_type_id = expression.eval_types(registry, relations, scopes)?;
+            let expression_type_id = expression.eval_types(pager.clone(), registry, relations, scopes)?;
 
             arg.ttype_id().must_eq(&expression_type_id)?;
             
             if !arg_names.insert(arg.name()) {
                 return Err(TypeError::FunctionDuplicateArg {
                     arg: arg.name().clone(),
-                })
+                });
             }
         }
 
         Ok(ret_type.clone())
     }
 
-    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
         let function = registry.function(&self.function).expect("function not found");
         let mut args = Vec::new();
 
         for arg in &self.args {
-            args.push(arg.eval(registry, relations, scopes)?);
+            args.push(arg.eval(pager.clone(), registry, relations, scopes)?);
         }
 
-        function.invoke(registry, relations, args)
+        function.invoke(pager, registry, relations, args)
     }
 }
 
@@ -74,14 +78,17 @@ impl Debug for FunctionInvocation {
 
 #[cfg(test)]
 mod tests {
-    use crate::{db::{registry::Registry, relation::memory::MemoryRelation, DbRelations}, expression::{EnumLiteral, EvalError, Expression, Literal}, typesystem::value::ScalarValue};
+    use std::sync::{Arc, Mutex};
+
+    use crate::{db::{registry::Registry, DbRelationSet}, expression::{EnumLiteral, EvalError, Expression, Literal}, typesystem::value::ScalarValue};
 
     use super::*;
 
     #[test]
     fn functions() {
-        let relations = DbRelations::<MemoryRelation>::new();
-        let registry = Registry::new(&relations);
+        let pager = Arc::new(Mutex::new(Pager::new_memory()));
+        let relations = DbRelationSet::new();
+        let registry = Registry::new(pager.clone(), &relations);
 
         let expr_panic = Expression::FunctionInvocation(FunctionInvocation {
             function: id_path!("unwrap"),
@@ -96,8 +103,8 @@ mod tests {
             ].into(),
         });
 
-        expr_panic.eval_types(&registry, &relations, &Default::default()).unwrap();
-        let panic_err = expr_panic.eval(&registry, &relations, &Default::default()).unwrap_err();
+        expr_panic.eval_types(pager.clone(), &registry, &relations, &Default::default()).unwrap();
+        let panic_err = expr_panic.eval(pager.clone(), &registry, &relations, &Default::default()).unwrap_err();
 
         let EvalError::UserPanic(panic_message) = panic_err;
 
@@ -116,8 +123,8 @@ mod tests {
             ].into(),
         });
 
-        expr_panic.eval_types(&registry, &relations, &Default::default()).unwrap();
-        let value = expr_pass.eval(&registry, &relations, &Default::default()).unwrap();
+        expr_panic.eval_types(pager.clone(), &registry, &relations, &Default::default()).unwrap();
+        let value = expr_pass.eval(pager.clone(), &registry, &relations, &Default::default()).unwrap();
 
         assert_eq!(Value::UNIT, value);
     }

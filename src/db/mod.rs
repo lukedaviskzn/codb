@@ -1,104 +1,207 @@
-use std::{collections::BTreeMap, panic::catch_unwind, sync::RwLock};
+use std::{collections::BTreeMap, io, sync::{Arc, Mutex}};
 
 use codb_core::Ident;
+use pager::{DbHeader, FreeListPage, HeaderReadGuard, LinkedPageReadGuard, LinkedPageWriteGuard, Page, PagePtr, Pager};
 use registry::Registry;
-use relation::Relation;
+use relation::memory::PagerRelation;
 
-use crate::{query::{Query, QueryExecutionError}, typesystem::{scope::ScopeValues, value::Value}};
+use crate::{db::relation::Schema, error::NormaliseToIo, query::{schema_query::{RelationSchemaQuery, SchemaError, SchemaQuery, TypeSchemaQuery}, DataQuery, Query, QueryExecutionError}, typesystem::{scope::{ScopeTypes, ScopeValues}, value::{ScalarValue, Value}}};
 
 pub mod registry;
 pub mod relation;
+pub mod pager;
 
-// DB
-// |
-// v
-// Lock(Inner)
-// |        \
-// v         '----> Type Registry
-// Lock(Relations)-----.
-// |                    \
-// v                     v
-// Lock(Relation A)   Lock(Relation B)
-    #[allow(unused)]
-pub struct Db<R: Relation> {
-    inner: RwLock<DbInner<R>>,
+#[allow(unused)]
+pub struct Db {
+    pager: Arc<Mutex<Pager>>,
 }
 
-impl<R: Relation> Db<R> {
-    #[allow(unused)]
-    pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(DbInner::new()),
+impl Db {
+    pub fn create_new(pager: Pager) -> io::Result<Db> {
+        let pager = Arc::new(Mutex::new(pager));
+
+        let relation_set_page = {
+            let mut lock = pager.lock().into_io()?;
+
+            // write dummy header to allocate space
+            lock.write_header(&DbHeader::new(PagePtr::MIN, PagePtr::MIN))?;
+
+            let relation_set = DbRelationSet::new();
+            lock.new_linked_pages(&relation_set)?
+        };
+        {
+            let manifest = DbManifest::new(pager.clone(), relation_set_page)?;
+            
+            let mut lock = pager.lock().into_io()?;
+            
+            let manifest_page = lock.new_linked_pages(&manifest)?;
+            
+            let freelist_page = lock.write_new_page(&Page::FreeList(FreeListPage {
+                next: None,
+            }))?;
+            
+            let header = DbHeader::new(manifest_page, freelist_page);
+            lock.write_header(&header)?;
         }
-    }
-
-    #[allow(unused)]
-    pub fn execute(&self, query: Query) -> Result<Value, QueryExecutionError> {
-        let out = catch_unwind(|| {
-            match query {
-                Query::Data(expression) => {
-                    let db = self.inner.read().expect("failed to acquire read lock on db inner");
-                    let registry = db.registry();
-                    let relations = db.relations().read().unwrap();
-                    expression.eval(registry, &relations, &ScopeValues::EMPTY)
-                },
-            }
-        });
-
-        match out {
-            Ok(Ok(out)) => Ok(out),
-            Ok(Err(err)) => Err(err.into()),
-            Err(err) => Err(QueryExecutionError::UnexpectedPanic(err)),
-        }
-    }
-}
-
-pub struct DbInner<R: Relation> {
-    registry: Registry,
-    relations: RwLock<DbRelations<R>>,
-}
-
-impl<R: Relation> DbInner<R> {
-    fn new() -> Self {
-        let relations = DbRelations::new();
         
-        Self {
-            registry: Registry::new(&relations),
-            relations: RwLock::new(relations),
+        Ok(Db {
+            pager,
+        })
+    }
+    
+    pub fn open(pager: Pager) -> Db {
+        Db {
+            pager: Arc::new(Mutex::new(pager)),
         }
+    }
+
+    pub fn header(&self) -> HeaderReadGuard {
+        HeaderReadGuard::new(self.pager.clone()).expect("failed to read header")
+    }
+
+    pub fn manifest(&self) -> LinkedPageReadGuard<DbManifest> {
+        let manifest_page = self.header().manifest;
+        LinkedPageReadGuard::new(self.pager.clone(), manifest_page).expect("failed to read manifest")
+    }
+
+    pub fn manifest_mut(&self) -> LinkedPageWriteGuard<DbManifest> {
+        let manifest_page = self.header().manifest;
+        LinkedPageWriteGuard::new(self.pager.clone(), manifest_page).expect("failed to write manifest")
+    }
+
+    pub fn execute(&self, query: Query) -> Result<Value, QueryExecutionError> {
+        match query {
+            Query::Data(DataQuery(expression)) => {
+                let manifest = self.manifest();
+                let registry = &manifest.registry;
+
+                let relations = manifest.relations(self.pager.clone());
+
+                expression.eval_types(self.pager.clone(), registry, &relations, &ScopeTypes::EMPTY)?;
+
+                let result = expression.eval(self.pager.clone(), registry, &relations, &ScopeValues::EMPTY)?;
+
+                Ok(result)
+            },
+            Query::Schema(schema_query) => {
+                match schema_query {
+                    SchemaQuery::Type(query) => {
+                        let mut manifest = self.manifest_mut();
+                        match query {
+                            TypeSchemaQuery::Create {
+                                name,
+                                ttype,
+                            } => {
+                                let (type_name, module_path) = name.split_last();
+                                let Some(module) = manifest.registry_mut().module_mut(module_path) else {
+                                    return Err(SchemaError::InvalidPath(name).into());
+                                };
+
+                                let added = module.insert(type_name.clone(), ttype);
+
+                                Ok(Value::Scalar(ScalarValue::Bool(added)))
+                            },
+                        }
+                    },
+                    SchemaQuery::Relation(query) => {
+                        let manifest = self.manifest();
+                        let mut relations = manifest.relations_mut(self.pager.clone());
+                        match query {
+                            RelationSchemaQuery::Create {
+                                name,
+                                ttype,
+                                pkey,
+                            } => {
+                                let schema = Schema::new(&manifest.registry, ttype, pkey)?;
+                                let relation = PagerRelation::new(schema);
+                                
+                                let added = relations.insert(name, relation, self.pager.clone());
+
+                                Ok(Value::Scalar(ScalarValue::Bool(added)))
+                            },
+                        }
+                    },
+                }
+            },
+        }
+    }
+
+    pub fn pager(&self) -> &Arc<Mutex<Pager>> {
+        &self.pager
+    }
+}
+
+#[binrw]
+pub struct DbManifest {
+    registry: Registry,
+    relation_set_page: PagePtr,
+}
+
+impl DbManifest {
+    pub(super) fn new(pager: Arc<Mutex<Pager>>, relation_set_page: PagePtr) -> io::Result<DbManifest> {
+        let registry = {
+            let relation_set = LinkedPageReadGuard::new(pager.clone(), relation_set_page)?;
+            Registry::new(pager, &relation_set)
+        };
+        
+        Ok(Self {
+            registry,
+            relation_set_page,
+        })
     }
 
     pub fn registry(&self) -> &Registry {
         &self.registry
     }
 
-    #[allow(unused)]
     pub fn registry_mut(&mut self) -> &mut Registry {
         &mut self.registry
     }
 
-    #[allow(unused)]
-    pub fn relations(&self) -> &RwLock<DbRelations<R>> {
-        &self.relations
+    pub fn relations(&self, pager: Arc<Mutex<Pager>>) -> LinkedPageReadGuard<DbRelationSet> {
+        LinkedPageReadGuard::new(pager, self.relation_set_page).expect("failed to read relation set")
+    }
+
+    pub fn relations_mut(&self, pager: Arc<Mutex<Pager>>) -> LinkedPageWriteGuard<DbRelationSet> {
+        LinkedPageWriteGuard::new(pager, self.relation_set_page).expect("failed to read relation set")
     }
 }
 
-pub struct DbRelations<R: Relation>(BTreeMap<Ident, RwLock<R>>);
+#[binrw]
+pub struct DbRelationSet {
+    #[bw(calc = self.relations.len() as u64)]
+    len: u64,
+    #[br(count = len, map = |relations: Vec<(Ident, PagePtr)>| BTreeMap::from_iter(relations.into_iter()))]
+    #[bw(map = |relations| Vec::<(Ident, PagePtr)>::from_iter(relations.clone().into_iter()))]
+    relations: BTreeMap<Ident, PagePtr>,
+}
 
-impl<R: Relation> DbRelations<R> {
+impl DbRelationSet {
     pub fn new() -> Self {
-        Self(BTreeMap::new())
+        Self {
+            relations: BTreeMap::new(),
+        }
     }
 
-    pub fn get(&self, relation: &str) -> Option<&RwLock<R>> {
-        self.0.get(relation)
+    pub fn get(&self, relation: &str, pager: Arc<Mutex<Pager>>) -> Option<LinkedPageReadGuard<PagerRelation>> {
+        let page_ptr = self.relations.get(relation)?;
+        Some(LinkedPageReadGuard::new(pager, *page_ptr).expect("failed to read page"))
     }
 
-    pub fn insert(&mut self, name: Ident, relation: R) -> bool {
-        if self.0.contains_key(&name) {
+    pub fn get_mut(&self, relation: &str, pager: Arc<Mutex<Pager>>) -> Option<LinkedPageWriteGuard<PagerRelation>> {
+        let page_ptr = self.relations.get(relation)?;
+        Some(LinkedPageWriteGuard::new(pager, *page_ptr).expect("failed to read page"))
+    }
+
+    pub fn insert(&mut self, name: Ident, relation: PagerRelation, pager: Arc<Mutex<Pager>>) -> bool {
+        if self.relations.contains_key(&name) {
             return false;
         }
-        self.0.insert(name, RwLock::new(relation));
+
+        let page_ptr = pager.lock().expect("failed to lock pager")
+            .new_linked_pages(&relation).expect("failed to write new pages");
+
+        self.relations.insert(name, page_ptr);
         true
     }
 }
@@ -107,29 +210,29 @@ impl<R: Relation> DbRelations<R> {
 mod tests {
     use std::ops::Bound;
 
-    use codb_core::IdentForest;
+    use codb_core::{IdentForest, IdentTree};
     use itertools::Itertools;
 
-    use crate::{expression::{Expression, InterpreterAction, Literal, StructLiteral}, typesystem::{ttype::{EnumType, StructType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue}}};
+    use crate::{db::{registry::TTypeId, relation::{Relation, Schema}, Db}, expression::{Expression, InterpreterAction, Literal, StructLiteral}, query::{lexer::Lexer, parser::Parser, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery, Query}, typesystem::{ttype::{CompositeType, EnumType, StructType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue, Value}}};
 
-    use super::{registry::TTypeId, relation::{memory::MemoryRelation, RelationRef, Schema}, *};
+    use super::{pager::Pager, relation::memory::PagerRelation};
 
     fn db_initial_values(ttype: &StructType) -> [StructValue; 3] {
         let mut rows = [
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
+            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), indexmap! {
                 id!("id") => Value::Scalar(ScalarValue::Int32(1).into()),
                 id!("name") => Value::Scalar(ScalarValue::String("Jim Jones".into()).into()),
                 id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
             }) }.into(),
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
+            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), indexmap! {
                 id!("id") => Value::Scalar(ScalarValue::Int32(2).into()),
                 id!("name") => Value::Scalar(ScalarValue::String("Jimboni Jonesi".into()).into()),
                 id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
             }) }.into(),
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), btreemap! {
+            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), indexmap! {
                 id!("id") => Value::Scalar(ScalarValue::Int32(-1).into()),
                 id!("name") => Value::Scalar(ScalarValue::String("El Jones, Jim".into()).into()),
                 id!("active") => Value::Scalar(ScalarValue::Bool(false).into()),
@@ -139,27 +242,27 @@ mod tests {
         rows
     }
 
-    fn create_db() -> Db<MemoryRelation> {
-        let db = Db::<MemoryRelation>::new();
+    fn create_db() -> Db {
+        let db = Db::create_new(Pager::new_memory()).expect("failed to create db");
         
         {
-            let db_inner = db.inner.read().unwrap();
-            
+            let db_manifest = db.manifest();
+            let registry = db_manifest.registry();
+            let mut relation_set = db_manifest.relations_mut(db.pager().clone());
+
             let my_type = StructType::new(indexmap! {
                 id!("id") => TTypeId::INT32,
                 id!("name") => TTypeId::STRING,
                 id!("active") => TTypeId::BOOL,
             });
 
-            let mut relations = db_inner.relations().write().unwrap();
-
-            let registry = db_inner.registry();
-            
-            relations.insert(id!("Rel"), MemoryRelation::new(
+            let mut relation = PagerRelation::new(
                 Schema::new(registry, my_type.clone(), IdentForest::from_nested_idents([id!("id").into()])).unwrap()
-            ));
+            );
+            
+            relation.extend(&registry, db_initial_values(&my_type));
 
-            relations.get("Rel").unwrap().write().unwrap().extend(&registry, db_initial_values(&my_type));
+            relation_set.insert(id!("Rel"), relation, db.pager.clone());
         }
 
         db
@@ -167,8 +270,8 @@ mod tests {
 
     #[test]
     fn test() {
-        let db = Db::<MemoryRelation>::new();
-        let db = db.inner.read().unwrap();
+        let db = Db::create_new(Pager::new_memory()).expect("failed to create db");
+        let manifest = db.manifest();
         
         let my_type = StructType::new(indexmap! {
             id!("id") => TTypeId::INT32,
@@ -176,15 +279,17 @@ mod tests {
             id!("active") => TTypeId::BOOL,
         });
 
-        let mut relations = db.relations().write().unwrap();
+        let mut relations = manifest.relations_mut(db.pager().clone());
 
-        let registry = db.registry();
-        
-        relations.insert(id!("Rel"), MemoryRelation::new(
+        let registry = manifest.registry();
+
+        let relation = PagerRelation::new(
             Schema::new(registry, my_type, IdentForest::from_nested_idents([id!("id").into()])).unwrap()
-        ));
+        );
 
-        let rel = relations.get("Rel").unwrap().read().unwrap();
+        relations.insert(id!("Rel"), relation, db.pager.clone());
+
+        let rel = relations.get("Rel", db.pager.clone()).expect("relation not found");
         rel.draw(registry);
     }
 
@@ -192,12 +297,12 @@ mod tests {
     fn execute_range_remove() {
         let db = create_db();
 
-        let value = db.execute(Query::Data(Expression::Action(InterpreterAction::Range {
+        let value = db.execute(Query::Data(DataQuery(Expression::Action(InterpreterAction::Range {
             relation: id!("Rel"),
             ident_forest: IdentForest::empty(),
             start: Box::new(Bound::Unbounded),
             end: Box::new(Bound::Unbounded),
-        }))).unwrap();
+        })))).unwrap();
 
         let array: ArrayValue = value.try_into().unwrap();
         let mut entries: Vec<StructValue> = array.entries().iter().map(|entry| entry.clone().try_into().unwrap()).collect_vec();
@@ -206,11 +311,10 @@ mod tests {
         let relation_type_option;
         let pkey_value: Literal;
         {
-            let db_inner = db.inner.read().unwrap();
-            let registry = db_inner.registry();
-            let relations = db_inner.relations().read().unwrap();
-            let relation = relations.get(&id!("Rel")).unwrap();
-            let relation = relation.read().unwrap();
+            let db_manifest = db.manifest();
+            let registry = db_manifest.registry();
+            let relations = db_manifest.relations(db.pager.clone());
+            let relation = relations.get("Rel", db.pager.clone()).unwrap();
 
             assert_eq!(entries, db_initial_values(relation.schema().ttype()));
 
@@ -228,25 +332,156 @@ mod tests {
             relation_type_option = EnumType::new_option(relation.schema().ttype_id());
         }
 
-        let out = db.execute(Query::Data(Expression::Action(InterpreterAction::Remove {
+        let out = db.execute(Query::Data(DataQuery(Expression::Action(InterpreterAction::Remove {
             relation: id!("Rel"),
             pkey: Box::new(Expression::Literal(pkey_value.clone())),
-        }))).unwrap();
+        })))).unwrap();
 
         let out: EnumValue = out.try_into().unwrap();
         let out = out.into_inner_value();
 
         assert_eq!(expected_deleted_row, out);
 
-        let out = db.execute(Query::Data(Expression::Action(InterpreterAction::Remove {
+        let out = db.execute(Query::Data(DataQuery(Expression::Action(InterpreterAction::Remove {
             relation: id!("Rel"),
             pkey: Box::new(Expression::Literal(pkey_value.clone())),
-        }))).unwrap();
+        })))).unwrap();
 
         let out: EnumValue = out.try_into().unwrap();
 
         let expected_none = EnumValue::new_option_none(TTypeId::new_anonymous(relation_type_option.into()));
 
         assert_eq!(expected_none, out);
+    }
+
+    #[test]
+    fn data_query() {
+        let db = create_db();
+
+        let lexer = Lexer::new("
+            #Rel.range<id>(
+                /* 0-1 instead of just -1 since negation operator isn't finished */
+                struct { id: int32 } { id: - 0i32 10i32 },
+                struct { id: int32 } { id: 10i32 }
+            )
+        ".chars());
+        let mut parser = Parser::new(lexer);
+
+        let query = {
+            let manifest = db.manifest();
+
+            Query::Data(
+                DataQuery(parser.parse_expression(
+                    db.pager.clone(),
+                    &manifest.registry,
+                    &manifest.relations(db.pager.clone())
+                ).expect("failed to parse query").1)
+            )
+        };
+
+        let value = db.execute(query).unwrap();
+
+        let array: ArrayValue = value.try_into().unwrap();
+        let mut entries: Vec<StructValue> = array.entries().iter().map(|entry| entry.clone().try_into().unwrap()).collect_vec();
+
+        let expected_deleted_row: Value;
+        let relation_type_option;
+        {
+            let db_manifest = db.manifest();
+            let relations = db_manifest.relations(db.pager.clone());
+            let relation = relations.get("Rel", db.pager.clone()).unwrap();
+
+            assert_eq!(entries, db_initial_values(relation.schema().ttype()));
+
+            expected_deleted_row = entries.remove(0).into();
+
+            relation_type_option = EnumType::new_option(relation.schema().ttype_id());
+        }
+
+        let lexer = Lexer::new("
+            #Rel.remove(
+                // 0-1 instead of just -1 since negation operator isn't finished
+                struct { id: int32 } { id: - 0i32 1i32 }
+            )
+        ".chars());
+        let mut parser = Parser::new(lexer);
+
+        let query = {
+            let manifest = db.manifest();
+
+            Query::Data(
+                DataQuery(parser.parse_data_query(
+                    db.pager.clone(),
+                    &manifest.registry,
+                    &manifest.relations(db.pager.clone())
+                ).expect("failed to vote"))
+            )
+        };
+
+        let out = db.execute(query.clone()).unwrap();
+
+        let out: EnumValue = out.try_into().unwrap();
+        let out = out.into_inner_value();
+
+        assert_eq!(expected_deleted_row, out);
+
+        let out = db.execute(query).unwrap();
+
+        let out: EnumValue = out.try_into().unwrap();
+
+        let expected_none = EnumValue::new_option_none(TTypeId::new_anonymous(relation_type_option.into()));
+
+        assert_eq!(expected_none, out);
+    }
+
+    #[test]
+    fn schema_query_insert_type() {
+        let db = create_db();
+
+        let query = {
+            Query::Schema(
+                SchemaQuery::Type(TypeSchemaQuery::Create {
+                    name: id_path!("MyType"),
+                    ttype: CompositeType::Struct(StructType::new(indexmap! {
+                        id!("id") => TTypeId::INT32,
+                        id!("name") => TTypeId::STRING,
+                    })),
+                }),
+            )
+        };
+
+        let out = db.execute(query.clone()).unwrap();
+
+        assert_eq!(Value::TRUE, out);
+
+        let out = db.execute(query.clone()).unwrap();
+
+        assert_eq!(Value::FALSE, out);
+    }
+
+    #[test]
+    fn schema_query_insert_relation() {
+        let db = create_db();
+
+        let query = {
+            Query::Schema(
+                SchemaQuery::Relation(RelationSchemaQuery::Create {
+                    name: id!("MyRelation"),
+                    ttype: StructType::new(indexmap! {
+                        id!("id") => TTypeId::INT32,
+                        id!("name") => TTypeId::STRING,
+                    }),
+                    pkey: IdentForest::new([IdentTree::new(id!("id"), IdentForest::empty())]),
+                }),
+            )
+        };
+
+        let out = db.execute(query.clone()).unwrap();
+
+        assert_eq!(Value::TRUE, out);
+
+        let out = db.execute(query.clone()).unwrap();
+
+        assert_eq!(Value::FALSE, out);
     }
 }

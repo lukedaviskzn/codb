@@ -1,21 +1,26 @@
-use std::{borrow::Cow, fmt::Debug};
+use std::{borrow::Cow, fmt::Debug, sync::{Arc, Mutex}};
 
 use codb_core::Ident;
+use itertools::Itertools;
 
-use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, expression::{EvalError, Expression}};
+use crate::{db::{pager::Pager, registry::{Registry, TTypeId}, DbRelationSet}, expression::{EvalError, Expression}};
 
 use super::{scope::{ScopeTypes, ScopeValues}, ttype::StructType, value::{StructValue, Value}, TypeError};
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Function {
-    args: Box<[FunctionArg]>,
+    #[bw(calc = args.len() as u64)]
+    args_len: u64,
+    #[br(count = args_len)]
+    args: Vec<FunctionArg>,
     result_type_id: TTypeId,
     expression: Expression,
 }
 
 impl Function {
-    pub fn new<T: Into<FunctionArg>, R: Relation>(registry: &Registry, relations: &DbRelations<R>, args: impl IntoIterator<Item = T>, result_type_id: TTypeId, expression: Expression) -> Result<Function, TypeError> {
-        let args: Box<[FunctionArg]> = args.into_iter().map(|arg| arg.into()).collect();
+    pub fn new<T: Into<FunctionArg>>(pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, args: impl IntoIterator<Item = T>, result_type_id: TTypeId, expression: Expression) -> Result<Function, TypeError> {
+        let args = args.into_iter().map(|arg| arg.into()).collect_vec();
 
         let mut scope_types = indexmap! {};
 
@@ -25,7 +30,7 @@ impl Function {
 
         let arg_scope = ScopeTypes::one(Cow::Owned(StructType::new(scope_types)));
 
-        let expression_type_id = expression.eval_types(registry, relations, &arg_scope)?;
+        let expression_type_id = expression.eval_types(pager, registry, relations, &arg_scope)?;
 
         expression_type_id.must_eq(&result_type_id)?;
 
@@ -44,14 +49,14 @@ impl Function {
         &self.result_type_id
     }
 
-    pub fn invoke<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, args: impl Into<Box<[Value]>>) -> Result<Value, EvalError> {
+    pub fn invoke(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, args: impl Into<Box<[Value]>>) -> Result<Value, EvalError> {
         let args = args.into();
         if args.len() != self.args.len() {
             panic!("attempted to invoke function with wrong number of arguments, got {}, expected {}", args.len(), self.args.len());
         }
 
         let mut arg_types = indexmap! {};
-        let mut arg_values = btreemap! {};
+        let mut arg_values = indexmap! {};
 
         for (arg, value) in self.args.iter().zip(args) {
             arg_types.insert(arg.name().clone(), arg.ttype_id().clone());
@@ -67,7 +72,7 @@ impl Function {
 
         let arg_values = ScopeValues::one(Cow::Owned(arg_values));
 
-        self.expression.eval(registry, relations, &arg_values)
+        self.expression.eval(pager, registry, relations, &arg_values)
     }
 }
 
@@ -87,6 +92,7 @@ impl Debug for Function {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FunctionArg {
     name: Ident,

@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::{Arc, Mutex}};
 
 use codb_core::{Ident, IdentPath};
 use module::Module;
@@ -7,12 +7,16 @@ mod module;
 
 use crate::{expression::{Branch, ControlFlow, Expression, InterpreterAction, Literal, MatchControlFlow}, typesystem::{function::{Function, FunctionArg}, ttype::{ArrayType, CompositeType, EnumType, ScalarType, TType}, TypeError}};
 
-use super::{relation::Relation, DbRelations};
+use super::{pager::Pager, DbRelationSet};
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TTypeId {
+    #[brw(magic = 0u8)]
     Scalar(ScalarType),
+    #[brw(magic = 1u8)]
     Composite(CompositeTTypeId),
+    #[brw(magic = 2u8)]
     Array(Box<ArrayType>),
 }
 
@@ -97,9 +101,12 @@ impl From<ArrayType> for TTypeId {
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CompositeTTypeId {
+    #[brw(magic = 0u8)]
     Path(IdentPath),
+    #[brw(magic = 1u8)]
     Anonymous(Box<CompositeType>),
 }
 
@@ -107,11 +114,7 @@ impl Debug for CompositeTTypeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Path(path) => Debug::fmt(path, f),
-            Self::Anonymous(ttype) => {
-                write!(f, "anon{{")?;
-                Debug::fmt(ttype, f)?;
-                write!(f, "}}")
-            },
+            Self::Anonymous(ttype) => Debug::fmt(ttype, f),
         }
     }
 }
@@ -122,27 +125,27 @@ impl From<IdentPath> for CompositeTTypeId {
     }
 }
 
+#[binrw]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Registry {
     root: Module,
 }
 
 impl Registry {
-    pub fn new<R: Relation>(relations: &DbRelations<R>) -> Registry {
+    pub fn new(pager: Arc<Mutex<Pager>>, relations: &DbRelationSet) -> Registry {
         let mut registry = Registry {
             root: Module::new(),
         };
 
-        // Result<(), String>
         registry.root
-            .add(id!("Result"), EnumType::new(indexmap! {
+            .insert(id!("Result"), EnumType::new(indexmap! {
                 id!("Ok") => TTypeId::UNIT,
                 id!("Err") => TTypeId::STRING,
-            }))
-            .expect("Result ident is already taken");
+            }));
 
-        // unwrap(result)
         registry.root
-            .add(id!("unwrap"), Function::new(
+            .insert(id!("unwrap"), Function::new(
+                pager,
                 &registry,
                 relations,
                 [FunctionArg::new(id!("result"), id_path!("Result").into())],
@@ -157,8 +160,7 @@ impl Registry {
                         )),
                     },
                 }))),
-            ).expect("failed to type check `unwrap`"))
-            .expect("`unwrap` ident is already taken");
+            ).expect("failed to type check `unwrap`"));
 
         registry
     }

@@ -2,6 +2,7 @@ use std::fmt::{Debug, Display};
 
 use crate::{Ident, IdentForest};
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentTree {
     pub(super) ident: Ident,

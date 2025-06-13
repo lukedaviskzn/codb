@@ -1,14 +1,17 @@
-use std::{borrow::Cow, collections::BTreeMap, fmt::Debug};
+use std::{borrow::Cow, collections::BTreeMap, fmt::Debug, sync::{Arc, Mutex}};
 
 use codb_core::Ident;
 
-use crate::{db::{registry::{Registry, TTypeId}, relation::Relation, DbRelations}, typesystem::{scope::{ScopeTypes, ScopeValues}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{EnumValue, StructValue, Value}, TypeError}};
+use crate::{db::{pager::Pager, registry::{Registry, TTypeId}, DbRelationSet}, typesystem::{scope::{ScopeTypes, ScopeValues}, ttype::{CompositeType, EnumType, ScalarType, StructType, TType}, value::{EnumValue, StructValue, Value}, TypeError}};
 
 use super::{EvalError, Expression};
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ControlFlow {
+    #[brw(magic = 0u8)]
     If(IfControlFlow),
+    #[brw(magic = 1u8)]
     Match(MatchControlFlow),
 }
 
@@ -22,21 +25,22 @@ impl Debug for ControlFlow {
 }
 
 impl ControlFlow {
-    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
         match self {
-            ControlFlow::If(cf) => cf.eval_types(registry, relations, scopes),
-            ControlFlow::Match(cf) => cf.eval_types(registry, relations, scopes),
+            ControlFlow::If(cf) => cf.eval_types(pager, registry, relations, scopes),
+            ControlFlow::Match(cf) => cf.eval_types(pager, registry, relations, scopes),
         }
     }
 
-    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
-            ControlFlow::If(cf) => cf.eval(registry, relations, scopes),
-            ControlFlow::Match(cf) => cf.eval(registry, relations, scopes),
+            ControlFlow::If(cf) => cf.eval(pager, registry, relations, scopes),
+            ControlFlow::Match(cf) => cf.eval(pager, registry, relations, scopes),
         }
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IfControlFlow {
     pub condition: Expression,
@@ -52,13 +56,13 @@ impl Debug for IfControlFlow {
 }
 
 impl IfControlFlow {
-    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
-        let cond_type_id = self.condition.eval_types(registry, relations, scopes)?;
+    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+        let cond_type_id = self.condition.eval_types(pager.clone(), registry, relations, scopes)?;
 
         cond_type_id.must_eq(&TTypeId::BOOL)?;
         
-        let then_type_id = self.then.eval_types(registry, relations, scopes)?;
-        let otherwise_type_id = self.then.eval_types(registry, relations, scopes)?;
+        let then_type_id = self.then.eval_types(pager.clone(), registry, relations, scopes)?;
+        let otherwise_type_id = self.then.eval_types(pager, registry, relations, scopes)?;
 
         then_type_id.must_eq(&self.ret_type)?;
         otherwise_type_id.must_eq(&self.ret_type)?;
@@ -66,21 +70,26 @@ impl IfControlFlow {
         Ok(then_type_id)
     }
 
-    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        let cond_value = self.condition.eval(registry, relations, scopes)?;
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
+        let cond_value = self.condition.eval(pager.clone(), registry, relations, scopes)?;
 
         if cond_value == Value::TRUE {
-            self.then.eval(registry, relations, scopes)
+            self.then.eval(pager, registry, relations, scopes)
         } else {
-            self.otherwise.eval(registry, relations, scopes)
+            self.otherwise.eval(pager, registry, relations, scopes)
         }
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MatchControlFlow {
     pub param: Expression,
     pub ret_type: TTypeId,
+    #[bw(calc = self.branches.len() as u64)]
+    len: u64,
+    #[br(count = len, map = |branches: Vec<(Ident, Branch)>| BTreeMap::from_iter(branches.into_iter()))]
+    #[bw(map = |branches| Vec::<(Ident, Branch)>::from_iter(branches.clone().into_iter()))]
     pub branches: BTreeMap<Ident, Branch>,
 }
 
@@ -100,8 +109,8 @@ impl Debug for MatchControlFlow {
 }
 
 impl MatchControlFlow {
-    pub fn eval_types<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
-        let param_type_id = self.param.eval_types(registry, relations, scopes)?;
+    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+        let param_type_id = self.param.eval_types(pager.clone(), registry, relations, scopes)?;
 
         if param_type_id == TTypeId::NEVER {
             return Ok(TTypeId::NEVER);
@@ -149,7 +158,7 @@ impl MatchControlFlow {
             let mut new_scopes = scopes.clone();
             new_scopes.push(Cow::Owned(new_scope));
 
-            let branch_type_id = branch.expression.eval_types(registry, relations, &new_scopes)?;
+            let branch_type_id = branch.expression.eval_types(pager.clone(), registry, relations, &new_scopes)?;
 
             branch_type_id.must_eq(&self.ret_type)?;
         }
@@ -157,14 +166,14 @@ impl MatchControlFlow {
         Ok(self.ret_type.clone())
     }
 
-    pub fn eval<R: Relation>(&self, registry: &Registry, relations: &DbRelations<R>, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
         let scope_types = scopes.types();
         
-        let param_type = self.param.eval_types(registry, relations, &scope_types).expect("failed to evaluate match parameter type");
+        let param_type = self.param.eval_types(pager.clone(), registry, relations, &scope_types).expect("failed to evaluate match parameter type");
         let param_type = registry.ttype(&param_type).expect("match parameter type not found");
         let param_type: EnumType = param_type.try_into().expect("match parameter type is not an enum");
         
-        let param_value: EnumValue = self.param.eval(registry, relations, scopes)?.try_into().expect("match paramter value is not an enum value");
+        let param_value: EnumValue = self.param.eval(pager.clone(), registry, relations, scopes)?.try_into().expect("match paramter value is not an enum value");
 
         let branch = self.branches.get(param_value.tag()).expect("branch not found");
 
@@ -173,17 +182,18 @@ impl MatchControlFlow {
         }).into());
         
         // SAFETY: eval_types should have already checked that this value is valid
-        let new_scope = unsafe { StructValue::new_unchecked(scope_type, btreemap! {
+        let new_scope = unsafe { StructValue::new_unchecked(scope_type, indexmap! {
             branch.ident.clone() => param_value.into_inner_value(),
         }) };
 
         let mut new_scopes = scopes.clone();
         new_scopes.push(Cow::Owned(new_scope));
         
-        branch.expression.eval(registry, relations, &new_scopes)
+        branch.expression.eval(pager, registry, relations, &new_scopes)
     }
 }
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Branch {
     ident: Ident,
@@ -207,14 +217,15 @@ impl Debug for Branch {
 
 #[cfg(test)]
 mod tests {
-    use crate::{db::relation::memory::MemoryRelation, expression::{EnumLiteral, Literal}, typesystem::value::ScalarValue};
+    use crate::{db::DbRelationSet, expression::{EnumLiteral, Literal}, typesystem::value::ScalarValue};
 
     use super::*;
 
     #[test]
     fn match_expr() {
-        let relations = DbRelations::<MemoryRelation>::new();
-        let registry = Registry::new(&relations);
+        let pager = Arc::new(Mutex::new(Pager::new_memory()));
+        let relations = DbRelationSet::new();
+        let registry = Registry::new(pager.clone(), &relations);
 
         let result_ttype_id = TTypeId::from(id_path!("Result"));
 
@@ -231,8 +242,8 @@ mod tests {
             },
         })));
 
-        expr.eval_types(&registry, &relations, &ScopeTypes::EMPTY).unwrap();
-        assert_eq!(Value::Scalar(ScalarValue::Int32(10).into()), expr.eval(&registry, &relations, &ScopeValues::EMPTY).unwrap());
+        expr.eval_types(pager.clone(), &registry, &relations, &ScopeTypes::EMPTY).unwrap();
+        assert_eq!(Value::Scalar(ScalarValue::Int32(10).into()), expr.eval(pager.clone(), &registry, &relations, &ScopeValues::EMPTY).unwrap());
 
         let expr = Expression::ControlFlow(Box::new(
             ControlFlow::Match(MatchControlFlow {
@@ -244,7 +255,7 @@ mod tests {
             })
         ));
 
-        assert_eq!(TypeError::MissingTag(id!("Err")), expr.eval_types(&registry, &relations, &ScopeTypes::EMPTY).unwrap_err());
+        assert_eq!(TypeError::MissingTag(id!("Err")), expr.eval_types(pager.clone(), &registry, &relations, &ScopeTypes::EMPTY).unwrap_err());
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Literal(
@@ -261,7 +272,7 @@ mod tests {
             },
         })));
 
-        assert_eq!(TTypeId::Scalar(ScalarType::String), expr.eval_types(&registry, &relations, &ScopeTypes::EMPTY).unwrap());
-        assert_eq!(Value::Scalar(ScalarValue::String("my_error".into()).into()), expr.eval(&registry, &relations, &ScopeValues::EMPTY).unwrap());
+        assert_eq!(TTypeId::Scalar(ScalarType::String), expr.eval_types(pager.clone(), &registry, &relations, &ScopeTypes::EMPTY).unwrap());
+        assert_eq!(Value::Scalar(ScalarValue::String("my_error".into()).into()), expr.eval(pager.clone(), &registry, &relations, &ScopeValues::EMPTY).unwrap());
     }
 }

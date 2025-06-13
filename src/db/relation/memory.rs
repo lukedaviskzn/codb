@@ -4,17 +4,22 @@ use codb_core::IdentForest;
 
 use crate::db::registry::{Registry, TTypeId};
 
-use super::{Key, Relation, RelationRef, Row, RowSize, Schema};
+use super::{Key, Relation, Row, RowSize, Schema};
 
+#[binrw]
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MemoryRelation {
+pub struct PagerRelation {
     schema: Schema,
+    #[bw(calc = self.rows.len() as u64)]
+    len: u64,
+    #[br(count = len, map = |rows: Vec<(Key, Row)>| BTreeMap::from_iter(rows.into_iter()))]
+    #[bw(map = |rows| Vec::<(Key, Row)>::from_iter(rows.clone().into_iter()))]
     rows: BTreeMap<Key, Row>,
 }
 
-impl MemoryRelation {
-    pub fn new(schema: Schema) -> MemoryRelation {
-        MemoryRelation {
+impl PagerRelation {
+    pub fn new(schema: Schema) -> PagerRelation {
+        PagerRelation {
             schema,
             rows: BTreeMap::new(),
         }
@@ -37,9 +42,9 @@ impl<T: Iterator<Item = Row>, U: Iterator<Item = Row>> Iterator for MemRelationI
     }
 }
 
-impl RelationRef for MemoryRelation {
-    fn schema(&self) -> &Schema {
-        &self.schema
+impl Relation for PagerRelation {
+    fn schema(&self) -> Schema {
+        self.schema.clone()
     }
 
     fn range(&self, registry: &Registry, ident_forest: &IdentForest, range: impl RangeBounds<Key>) -> impl Iterator<Item = Row> {
@@ -62,9 +67,7 @@ impl RelationRef for MemoryRelation {
             MemRelationIter::Scan(self.rows.iter().filter(move |(pkey, _)| owned_range.contains(pkey)).map(|(_, row)| row.clone()))
         }
     }
-}
 
-impl Relation for MemoryRelation {
     fn insert(&mut self, registry: &Registry, new_row: Row) -> bool {
         let schema_ttype_id = self.schema.ttype_id();
 
@@ -99,9 +102,11 @@ impl Relation for MemoryRelation {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use itertools::Itertools;
 
-    use crate::{db::DbRelations, typesystem::{ttype::StructType, value::{ScalarValue, StructValue}}};
+    use crate::{db::{pager::Pager, DbRelationSet}, typesystem::{ttype::StructType, value::{ScalarValue, StructValue}}};
 
     use super::*;
 
@@ -109,7 +114,7 @@ mod tests {
     fn memory_relation() {
         fn new_user(user_ttype_id: &TTypeId, id: i32, active: bool) -> StructValue {
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(user_ttype_id.clone(), btreemap! {
+            unsafe { StructValue::new_unchecked(user_ttype_id.clone(), indexmap! {
                 id!("id") => ScalarValue::Int32(id).into(),
                 id!("active") => ScalarValue::Bool(active).into(),
             }) }
@@ -117,12 +122,13 @@ mod tests {
 
         fn new_id(user_id_ttype_id: &TTypeId, id: i32) -> StructValue {
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(user_id_ttype_id.clone(), btreemap! {
+            unsafe { StructValue::new_unchecked(user_id_ttype_id.clone(), indexmap! {
                 id!("id") => ScalarValue::Int32(id).into(),
             }) }
         }
 
-        let registry = Registry::new(&DbRelations::<MemoryRelation>::new());
+        let pager = Arc::new(Mutex::new(Pager::new_memory()));
+        let registry = Registry::new(pager, &DbRelationSet::new());
 
         let user_struct = StructType::new(indexmap! {
             id!("id") => TTypeId::INT32,
@@ -141,8 +147,8 @@ mod tests {
         let user_pkey = IdentForest::from_nested_idents([id!("id").into()]);
         let user_schema = Schema::new(&registry, user_struct, user_pkey).unwrap();
 
-        let mut users = MemoryRelation::new(user_schema.clone());
-        let mut inactive_users = MemoryRelation::new(user_schema.clone());
+        let mut users = PagerRelation::new(user_schema.clone());
+        let mut inactive_users = PagerRelation::new(user_schema.clone());
 
         users.insert(&registry, new_user(&user_ttype_id, 0, false));
         users.insert(&registry, new_user(&user_ttype_id, 1, true));
@@ -160,7 +166,7 @@ mod tests {
             });
         inactive_users.extend(&registry, new_rows);
 
-        let mut inactive_users_expected = MemoryRelation::new(user_schema.clone());
+        let mut inactive_users_expected = PagerRelation::new(user_schema.clone());
 
         let user_3 = new_user(&user_ttype_id, 3, false);
 

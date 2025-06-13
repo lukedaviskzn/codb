@@ -2,19 +2,23 @@ use std::{borrow::Borrow, fmt::Debug, ops::{Deref, Index}};
 
 use crate::{Ident, IdentTree, NestedIdent};
 
+#[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentForest {
-    trees: Box<[IdentTree]>,
+    #[bw(calc = trees.len() as u64)]
+    len: u64,
+    #[br(count = len)]
+    trees: Vec<IdentTree>,
 }
 
 impl IdentForest {
     pub fn empty() -> IdentForest {
         IdentForest {
-            trees: Box::new([]),
+            trees: Vec::new(),
         }
     }
 
-    pub fn new(trees: impl Into<Box<[IdentTree]>>) -> IdentForest {
+    pub fn new(trees: impl Into<Vec<IdentTree>>) -> IdentForest {
         IdentForest {
             trees: trees.into(),
         }
@@ -75,35 +79,35 @@ impl Debug for IdentForest {
 impl From<IdentTree> for IdentForest {
     fn from(value: IdentTree) -> Self {
         Self {
-            trees: Box::new([value]),
+            trees: vec![value],
         }
     }
 }
 
 impl Into<Box<[IdentTree]>> for IdentForest {
     fn into(self) -> Box<[IdentTree]> {
-        self.trees
+        self.trees.into()
     }
 }
 
 impl From<Box<[IdentTree]>> for IdentForest {
     fn from(trees: Box<[IdentTree]>) -> Self {
         Self {
-            trees,
+            trees: trees.into(),
         }
     }
 }
 
 impl Into<Vec<IdentTree>> for IdentForest {
     fn into(self) -> Vec<IdentTree> {
-        self.trees.into()
+        self.trees
     }
 }
 
 impl From<Vec<IdentTree>> for IdentForest {
     fn from(value: Vec<IdentTree>) -> Self {
         Self {
-            trees: value.into(),
+            trees: value,
         }
     }
 }

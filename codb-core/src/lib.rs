@@ -19,3 +19,6 @@ pub enum ParseIdentError {
     #[error("identifier may not contain {0:?}")]
     InvalidChar(char),
 }
+
+#[macro_use]
+extern crate binrw;
