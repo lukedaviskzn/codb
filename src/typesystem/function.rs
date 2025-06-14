@@ -62,7 +62,6 @@ impl Function {
             arg_values.insert(name.clone(), value);
         }
 
-        let arg_types = StructType::new(arg_types);
         // SAFETY: eval_types should have already checked that this is valid
         let arg_values = unsafe { StructValue::new_unchecked(
             arg_values,

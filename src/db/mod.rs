@@ -227,11 +227,11 @@ mod tests {
     use codb_core::{IdentForest, IdentTree};
     use itertools::Itertools;
 
-    use crate::{db::{registry::TTypeId, relation::{Relation, Schema}, Db}, expression::{CompositeLiteral, Expression, InterpreterAction, Literal, StructLiteral}, query::{lex::{lex, TokenSlice}, parser::{ExpressionArgs, Parse}, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery, Query}, typesystem::{ttype::{CompositeType, EnumType, StructType}, value::{ArrayValue, CompositeValue, EnumValue, ScalarValue, StructValue, Value}}};
+    use crate::{db::{registry::TTypeId, relation::{Relation, Schema}, Db}, expression::{CompositeLiteral, Expression, InterpreterAction, Literal, StructLiteral}, query::{lex::{lex, TokenSlice}, parser::{ExpressionArgs, Parse}, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery, Query}, typesystem::{ttype::{CompositeType, StructType}, value::{ArrayValue, CompositeValue, EnumValue, ScalarValue, StructValue, Value}}};
 
     use super::{pager::Pager, relation::memory::PagerRelation};
 
-    fn db_initial_values(ttype: &StructType) -> [StructValue; 3] {
+    fn db_initial_values() -> [StructValue; 3] {
         let mut rows = [
             // SAFETY: test case
             unsafe { StructValue::new_unchecked(indexmap! {
@@ -274,7 +274,7 @@ mod tests {
                 Schema::new(registry, my_type.clone(), IdentForest::from_nested_idents([id!("id").into()])).unwrap()
             );
             
-            relation.extend(&registry, db_initial_values(&my_type));
+            relation.extend(&registry, db_initial_values());
 
             relation_set.insert(id!("Rel"), relation, db.pager.clone());
         }
@@ -322,7 +322,6 @@ mod tests {
         let mut entries: Vec<StructValue> = array.entries().iter().map(|entry| entry.clone().try_into().unwrap()).collect_vec();
 
         let expected_deleted_row: Value;
-        let relation_type_option;
         let pkey_value: Literal;
         {
             let db_manifest = db.manifest();
@@ -330,7 +329,7 @@ mod tests {
             let relations = db_manifest.relations(db.pager.clone());
             let relation = relations.get("Rel", db.pager.clone()).unwrap();
 
-            assert_eq!(entries, db_initial_values(relation.schema().ttype()));
+            assert_eq!(entries, db_initial_values());
 
             expected_deleted_row = CompositeValue {
                 ttype_id: relation.schema().ttype_id(),
@@ -347,8 +346,6 @@ mod tests {
                     },
                 ).into()
             }.into();
-
-            relation_type_option = EnumType::new_option(relation.schema().ttype_id());
         }
 
         let out = db.execute(Query::Data(DataQuery(Expression::Action(InterpreterAction::Remove {
@@ -408,7 +405,7 @@ mod tests {
             let relations = db_manifest.relations(db.pager.clone());
             let relation = relations.get("Rel", db.pager.clone()).unwrap();
 
-            assert_eq!(entries, db_initial_values(relation.schema().ttype()));
+            assert_eq!(entries, db_initial_values());
 
             expected_deleted_row = CompositeValue {
                 ttype_id: relation.schema().ttype_id(),

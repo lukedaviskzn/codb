@@ -212,6 +212,10 @@ impl StructValue {
         &self.fields
     }
 
+    pub fn into_fields(self) -> IndexMap<Ident, Value> {
+        self.fields
+    }
+
     pub fn select(&self, registry: &Registry, ident_forest: &IdentForest) -> Result<StructValue, TypeError> {
         if ident_forest.is_empty() {
             return Ok(self.clone());

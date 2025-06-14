@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, ops::{Bound, RangeBounds}};
 
 use codb_core::IdentForest;
 
-use crate::db::registry::{Registry, TTypeId};
+use crate::db::registry::Registry;
 
 use super::{Key, Relation, Row, RowSize, Schema};
 
@@ -109,7 +109,7 @@ mod tests {
 
     use itertools::Itertools;
 
-    use crate::{db::{pager::Pager, DbRelationSet}, typesystem::{ttype::StructType, value::{ScalarValue, StructValue}}};
+    use crate::{db::{pager::Pager, registry::TTypeId, DbRelationSet}, typesystem::{ttype::StructType, value::{ScalarValue, StructValue}}};
 
     use super::*;
 
@@ -137,15 +137,6 @@ mod tests {
             id!("id") => TTypeId::INT32,
             id!("active") => TTypeId::BOOL,
         });
-
-        let user_ttype_id = TTypeId::new_anonymous(user_struct.clone().into());
-
-        let user_id_struct = user_struct.select(
-            &registry,
-            &IdentForest::from_nested_idents([id!("id").into()])
-        ).unwrap();
-
-        let user_id_ttype_id = TTypeId::new_anonymous(user_id_struct.clone().into());
 
         let user_pkey = IdentForest::from_nested_idents([id!("id").into()]);
         let user_schema = Schema::new(&registry, user_struct, user_pkey).unwrap();

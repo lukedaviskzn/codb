@@ -115,8 +115,7 @@ impl InterpreterAction {
                     ArrayType::new(relation.schema().ttype_id(), None)
                 ).into());
 
-                // returns variable length array of relation type
-                Ok(TTypeId::new_anonymous(ArrayType::new(relation.schema().ttype_id(), None).into()))
+                Ok(array_type)
             },
             InterpreterAction::Insert {
                 relation,

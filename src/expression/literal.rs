@@ -1,9 +1,8 @@
-use core::fmt;
 use std::{collections::BTreeMap, fmt::Debug, sync::{Arc, Mutex}};
 
 use codb_core::Ident;
 
-use crate::{db::{pager::Pager, registry::{CompositeTTypeId, Registry, TTypeId}, DbRelationSet}, expression::Expression, typesystem::{scope::{ScopeTypes, ScopeValues}, ttype::{ArrayType, CompositeType, EnumType, StructType, TType}, value::{ArrayValue, CompositeValue, CompositeValueInner, EnumValue, ScalarValue, StructValue, Value}, TypeError, TypeSet}};
+use crate::{db::{pager::Pager, registry::{CompositeTTypeId, Registry, TTypeId}, DbRelationSet}, expression::Expression, typesystem::{scope::{ScopeTypes, ScopeValues}, ttype::{ArrayType, CompositeType, StructType, TType}, value::{ArrayValue, CompositeValue, CompositeValueInner, EnumValue, ScalarValue, StructValue, Value}, TypeError, TypeSet}};
 
 use super::EvalError;
 
@@ -71,17 +70,15 @@ impl CompositeLiteral {
         match (
             ttype,
             &self.inner,
-            // &self.inner.eval_types(pager.clone(), registry, relations, scopes)?,
         ) {
             (
                 TType::Composite(CompositeType::Struct(ttype)),
                 CompositeLiteralInner::Struct(literal),
-                // CompositeType::Struct(literal_type),
             ) => {
                 // check literal fields are expected in type and check types
                 for (field, expr) in &literal.fields {
                     let field_ttype_id = ttype.fields().get(field).ok_or_else(|| TypeError::UnknownField(field.clone()))?;
-                    expr.eval_types(pager.clone(), registry, relations, scopes)?.must_eq(field_ttype_id);
+                    expr.eval_types(pager.clone(), registry, relations, scopes)?.must_eq(field_ttype_id)?;
                 }
 
                 // check no fields missing
@@ -96,7 +93,6 @@ impl CompositeLiteral {
             (
                 TType::Composite(CompositeType::Enum(ttype)),
                 CompositeLiteralInner::Enum(literal),
-                // CompositeType::Enum(literal_type),
             ) => {
                 let tag_ttype_id = ttype.tags().get(&literal.tag).ok_or_else(|| TypeError::UnknownTag(literal.tag.clone()))?;
 
@@ -108,7 +104,6 @@ impl CompositeLiteral {
             (
                 TType::Composite(CompositeType::Array(_)),
                 CompositeLiteralInner::Array(literal),
-                // CompositeType::Array(literal_type),
             ) => {
                 let inner_type = literal.inner_type(pager, registry, relations, scopes)?;
                 let array_type = TTypeId::Composite(CompositeTTypeId::Anonymous(
@@ -125,7 +120,6 @@ impl CompositeLiteral {
             (
                 ttype,
                 inner,
-                // literal_type,
             ) => {
                 Err(TypeError::TypeSetInvalid {
                     expected: match inner {
@@ -141,7 +135,23 @@ impl CompositeLiteral {
 
     pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<CompositeValue, EvalError> {
         let inner = match &self.inner {
-            CompositeLiteralInner::Struct(literal) => CompositeValueInner::Struct(literal.eval(pager, registry, relations, scopes)?),
+            CompositeLiteralInner::Struct(literal) => CompositeValueInner::Struct({
+                let value = literal.eval(pager, registry, relations, scopes)?;
+                let Some(TType::Composite(CompositeType::Struct(ttype))) = registry.ttype(&self.ttype_id) else {
+                    panic!("invalid type");
+                };
+
+                let mut old_fields = value.into_fields();
+                let mut new_fields = indexmap! {};
+
+                // reorder to match ttype order
+                for (name, _) in ttype.fields() {
+                    let (key, value) = old_fields.swap_remove_entry(name).expect("invalid value");
+                    new_fields.insert(key, value);
+                }
+
+                unsafe { StructValue::new_unchecked(new_fields) }
+            }),
             CompositeLiteralInner::Enum(literal) => CompositeValueInner::Enum(literal.eval(pager, registry, relations, scopes)?),
             CompositeLiteralInner::Array(literal) => CompositeValueInner::Array(literal.eval(pager, registry, relations, scopes)?),
         };

@@ -2,8 +2,14 @@
 
 - [x] Proper Scopes
 - [x] Functions
-- [ ] Expression Literals
+- [x] Expression Literals
+- [x] Check Constraints
+- [ ] Constraints
+    - [ ] Row/Type Constraints (e.g. check)
+    - [ ] Relation Constraints (e.g. unique key)
+    - [ ] DB Constraints (e.g. foreign key)
+- [ ] Type Inference
 
 # Later
 
-- [ ] B-Tree Relations
+- [ ] Proper B-Tree Relations

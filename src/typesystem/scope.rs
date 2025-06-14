@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use codb_core::{Ident, NestedIdent};
 
-use crate::{db::registry::{CompositeTTypeId, Registry, TTypeId}, typesystem::{ttype::{CompositeType, StructType}, value::{StructValue, Value}, TypeError}};
+use crate::{db::registry::{Registry, TTypeId}, typesystem::{ttype::StructType, value::{StructValue, Value}, TypeError}};
 
 #[derive(Debug, Clone, Default)]
 pub struct ScopeTypes<'a> {

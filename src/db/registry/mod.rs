@@ -5,7 +5,7 @@ use module::Module;
 
 pub mod module;
 
-use crate::{expression::{Branch, ControlFlow, Expression, InterpreterAction, Literal, MatchControlFlow}, typesystem::{function::Function, ttype::{ArrayType, CompositeType, EnumType, ScalarType, TType}, TypeError}};
+use crate::{expression::{Branch, ControlFlow, Expression, InterpreterAction, Literal, MatchControlFlow}, typesystem::{function::Function, ttype::{CompositeType, EnumType, ScalarType, TType}, TypeError}};
 
 use super::{pager::Pager, DbRelationSet};
 

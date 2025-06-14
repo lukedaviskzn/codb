@@ -173,7 +173,7 @@ impl Pager {
         Ok(NonZeroU64::new(index / PAGE_SIZE_U64).expect("unreachable, page ptr already checked"))
     }
 
-    fn free_page(&mut self, page_num: PagePtr) -> io::Result<()> {
+    fn free_page(&mut self, _page_num: PagePtr) -> io::Result<()> {
         // todo: actually free pages
         Ok(())
     }

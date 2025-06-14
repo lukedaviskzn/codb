@@ -552,13 +552,13 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
                 }
 
                 let Some((index, next_char)) = chars.next() else {
-                    token_length += 1;
                     return Err(LexError {
                         span: Span::beyond(index),
                         context: Some(LexContext::LexingString),
                         kind: LexErrorKind::UnexpectedEnd,
                     });
                 };
+                token_length += 1;
 
                 let replacement_char = match next_char {
                     'n' => '\n',
