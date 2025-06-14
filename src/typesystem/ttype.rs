@@ -11,7 +11,6 @@ use super::{TypeError, TypeSet};
 pub enum TType {
     Composite(CompositeType),
     Scalar(ScalarType),
-    Array(ArrayType),
 }
 
 impl TType {
@@ -32,7 +31,6 @@ impl TType {
         match self {
             TType::Composite(ttype) => Ok(TType::Composite(ttype.select(registry, trees)?)),
             TType::Scalar(ttype) => Ok(TType::Scalar(ttype.select(trees)?)),
-            TType::Array(ttype) => Ok(TType::Array(ttype.select(registry, trees)?)),
         }
     }
 
@@ -40,7 +38,6 @@ impl TType {
         match self {
             TType::Composite(ttype) => ttype.dot(ident),
             TType::Scalar(_) => None,
-            TType::Array(_) => None,
         }
     }
 }
@@ -50,7 +47,6 @@ impl Debug for TType {
         match self {
             Self::Composite(ttype) => Debug::fmt(ttype, f),
             Self::Scalar(ttype) => Debug::fmt(ttype, f),
-            Self::Array(ttype) => Debug::fmt(ttype, f),
         }
     }
 }
@@ -73,15 +69,15 @@ impl From<EnumType> for TType {
     }
 }
 
-impl From<ScalarType> for TType {
-    fn from(value: ScalarType) -> Self {
-        Self::Scalar(value)
+impl From<ArrayType> for TType {
+    fn from(value: ArrayType) -> Self {
+        Self::Composite(CompositeType::Array(value))
     }
 }
 
-impl From<ArrayType> for TType {
-    fn from(value: ArrayType) -> Self {
-        Self::Array(value)
+impl From<ScalarType> for TType {
+    fn from(value: ScalarType) -> Self {
+        Self::Scalar(value)
     }
 }
 
@@ -92,6 +88,8 @@ pub enum CompositeType {
     Struct(StructType),
     #[brw(magic = 1u8)]
     Enum(EnumType),
+    #[brw(magic = 2u8)]
+    Array(ArrayType),
 }
 
 impl CompositeType {
@@ -99,6 +97,7 @@ impl CompositeType {
         match self {
             CompositeType::Struct(ttype) => Ok(CompositeType::Struct(ttype.select(registry, ident_forest)?)),
             CompositeType::Enum(ttype) => Ok(CompositeType::Enum(ttype.select(ident_forest)?)),
+            CompositeType::Array(ttype) => Ok(CompositeType::Array(ttype.select(registry, ident_forest)?)),
         }
     }
 
@@ -106,6 +105,7 @@ impl CompositeType {
         match self {
             CompositeType::Struct(ttype) => ttype.dot(ident),
             CompositeType::Enum(_) => None,
+            CompositeType::Array(_) => None,
         }
     }
 }
@@ -115,6 +115,7 @@ impl Debug for CompositeType {
         match self {
             Self::Struct(ttype) => Debug::fmt(ttype, f),
             Self::Enum(ttype) => Debug::fmt(ttype, f),
+            Self::Array(ttype) => Debug::fmt(ttype, f),
         }
     }
 }
@@ -128,6 +129,12 @@ impl From<StructType> for CompositeType {
 impl From<EnumType> for CompositeType {
     fn from(value: EnumType) -> Self {
         Self::Enum(value)
+    }
+}
+
+impl From<ArrayType> for CompositeType {
+    fn from(value: ArrayType) -> Self {
+        Self::Array(value)
     }
 }
 
@@ -459,19 +466,5 @@ impl Debug for ArrayType {
             write!(f, "[]")?;
         }
         Debug::fmt(self.inner_ttype_id(), f)
-    }
-}
-
-impl TryFrom<TType> for ArrayType {
-    type Error = TypeError;
-
-    fn try_from(value: TType) -> Result<Self, Self::Error> {
-        match value {
-            TType::Array(ttype) => Ok(ttype),
-            ttype => Err(TypeError::TypeSetInvalid {
-                expected: TypeSet::Array,
-                got: ttype,
-            })
-        }
     }
 }

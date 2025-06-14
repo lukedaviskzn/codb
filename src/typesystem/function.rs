@@ -1,7 +1,7 @@
 use std::{borrow::Cow, fmt::Debug, sync::{Arc, Mutex}};
 
 use codb_core::Ident;
-use itertools::Itertools;
+use indexmap::IndexMap;
 
 use crate::{db::{pager::Pager, registry::{Registry, TTypeId}, DbRelationSet}, expression::{EvalError, Expression}};
 
@@ -12,20 +12,19 @@ use super::{scope::{ScopeTypes, ScopeValues}, ttype::StructType, value::{StructV
 pub struct Function {
     #[bw(calc = args.len() as u64)]
     args_len: u64,
-    #[br(count = args_len)]
-    args: Vec<FunctionArg>,
+    #[br(count = args_len, map = |fields: Vec<(Ident, TTypeId)>| IndexMap::from_iter(fields.into_iter()))]
+    #[bw(map = |fields| Vec::<(Ident, TTypeId)>::from_iter(fields.clone().into_iter()))]
+    args: IndexMap<Ident, TTypeId>,
     result_type_id: TTypeId,
     expression: Expression,
 }
 
 impl Function {
-    pub fn new<T: Into<FunctionArg>>(pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, args: impl IntoIterator<Item = T>, result_type_id: TTypeId, expression: Expression) -> Result<Function, TypeError> {
-        let args = args.into_iter().map(|arg| arg.into()).collect_vec();
-
+    pub fn new(pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, args: IndexMap<Ident, TTypeId>, result_type_id: TTypeId, expression: Expression) -> Result<Function, TypeError> {
         let mut scope_types = indexmap! {};
 
-        for arg in &args {
-            scope_types.insert(arg.name.clone(), arg.ttype_id().clone());
+        for (name, ttype_id) in &args {
+            scope_types.insert(name.clone(), ttype_id.clone());
         }
 
         let arg_scope = ScopeTypes::one(Cow::Owned(StructType::new(scope_types)));
@@ -41,7 +40,7 @@ impl Function {
         })
     }
 
-    pub fn args(&self) -> &[FunctionArg] {
+    pub fn args(&self) -> &IndexMap<Ident, TTypeId> {
         &self.args
     }
 
@@ -58,15 +57,14 @@ impl Function {
         let mut arg_types = indexmap! {};
         let mut arg_values = indexmap! {};
 
-        for (arg, value) in self.args.iter().zip(args) {
-            arg_types.insert(arg.name().clone(), arg.ttype_id().clone());
-            arg_values.insert(arg.name().clone(), value);
+        for ((name, ttype_id), value) in self.args.iter().zip(args) {
+            arg_types.insert(name.clone(), ttype_id.clone());
+            arg_values.insert(name.clone(), value);
         }
 
         let arg_types = StructType::new(arg_types);
         // SAFETY: eval_types should have already checked that this is valid
         let arg_values = unsafe { StructValue::new_unchecked(
-            TTypeId::new_anonymous(arg_types.clone().into()),
             arg_values,
         ) };
 
@@ -79,8 +77,8 @@ impl Function {
 impl Debug for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut function = f.debug_tuple("");
-        for arg in &self.args {
-            function.field(arg);
+        for (name, ttype_id) in &self.args {
+            function.field(&format!("{name:?}: {ttype_id:?}"));
         }
         function.finish()?;
 
@@ -89,44 +87,5 @@ impl Debug for Function {
         f.debug_set()
             .entry(&self.expression)
             .finish()
-    }
-}
-
-#[binrw]
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FunctionArg {
-    name: Ident,
-    ttype_id: TTypeId,
-}
-
-impl FunctionArg {
-    pub fn new(name: Ident, ttype_id: TTypeId) -> FunctionArg {
-        FunctionArg {
-            name,
-            ttype_id,
-        }
-    }
-
-    pub fn name(&self) -> &Ident {
-        &self.name
-    }
-
-    pub fn ttype_id(&self) -> &TTypeId {
-        &self.ttype_id
-    }
-}
-
-impl Debug for FunctionArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}: {:?}", self.name, self.ttype_id)
-    }
-}
-
-impl From<(Ident, TTypeId)> for FunctionArg {
-    fn from((name, ttype_id): (Ident, TTypeId)) -> Self {
-        Self {
-            name,
-            ttype_id,
-        }
     }
 }

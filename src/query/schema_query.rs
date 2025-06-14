@@ -1,6 +1,6 @@
 use codb_core::{Ident, IdentForest, IdentPath};
 
-use crate::{db::relation::Schema, typesystem::{ttype::{CompositeType, StructType}, TypeError}};
+use crate::typesystem::{ttype::{CompositeType, StructType}, TypeError};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SchemaError {
@@ -12,8 +12,19 @@ pub enum SchemaError {
 
 #[derive(Debug, Clone)]
 pub enum SchemaQuery {
+    Module(ModuleSchemaQuery),
     Type(TypeSchemaQuery),
     Relation(RelationSchemaQuery),
+}
+
+#[derive(Debug, Clone)]
+pub enum ModuleSchemaQuery {
+    Create {
+        name: IdentPath,
+    },
+    // Drop {
+    //     name: IdentPath,
+    // },
 }
 
 #[derive(Debug, Clone)]

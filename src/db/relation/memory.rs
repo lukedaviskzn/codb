@@ -50,14 +50,16 @@ impl Relation for PagerRelation {
     fn range(&self, registry: &Registry, ident_forest: &IdentForest, range: impl RangeBounds<Key>) -> impl Iterator<Item = Row> {
         let selected_type = self.schema.ttype.select(registry, ident_forest).expect("invalid ident forest");
 
-        let selected_type_id = TTypeId::new_anonymous(selected_type.clone().into());
-
         if let Bound::Included(bound) | Bound::Excluded(bound) = range.start_bound() {
-            bound.ttype_id().must_eq(&selected_type_id).expect("invalid bound");
+            if selected_type != bound.ttype() {
+                panic!("invalid bound");
+            }
         }
         
         if let Bound::Included(bound) | Bound::Excluded(bound) = range.end_bound() {
-            bound.ttype_id().must_eq(&selected_type_id).expect("invalid bound");
+            if selected_type != bound.ttype() {
+                panic!("invalid bound");
+            }
         }
 
         if selected_type.eq(&self.schema.pkey_ttype(registry).expect("invalid pkey")) {
@@ -69,9 +71,9 @@ impl Relation for PagerRelation {
     }
 
     fn insert(&mut self, registry: &Registry, new_row: Row) -> bool {
-        let schema_ttype_id = self.schema.ttype_id();
-
-        new_row.ttype_id().must_eq(&schema_ttype_id).expect("incorrect row type");
+        if self.schema.ttype != new_row.ttype() {
+            panic!("invalid row");
+        }
 
         let pkey = new_row.select(registry, &self.schema.pkey).expect("invalid pkey");
         
@@ -85,9 +87,10 @@ impl Relation for PagerRelation {
 
     fn remove(&mut self, registry: &Registry, pkey: &Key) -> Option<Row> {
         let pkey_ttype = self.schema.pkey_ttype(registry).expect("invalid pkey forest");
-        let pkey_ttype_id = TTypeId::new_anonymous(pkey_ttype.clone().into());
 
-        pkey_ttype_id.must_eq(&pkey.ttype_id()).expect("invalid pkey");
+        if pkey_ttype != pkey.ttype() {
+            panic!("invalid pkey");
+        }
 
         self.rows.remove(pkey)
     }
@@ -112,17 +115,17 @@ mod tests {
 
     #[test]
     fn memory_relation() {
-        fn new_user(user_ttype_id: &TTypeId, id: i32, active: bool) -> StructValue {
+        fn new_user(id: i32, active: bool) -> StructValue {
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(user_ttype_id.clone(), indexmap! {
+            unsafe { StructValue::new_unchecked(indexmap! {
                 id!("id") => ScalarValue::Int32(id).into(),
                 id!("active") => ScalarValue::Bool(active).into(),
             }) }
         }
 
-        fn new_id(user_id_ttype_id: &TTypeId, id: i32) -> StructValue {
+        fn new_id(id: i32) -> StructValue {
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(user_id_ttype_id.clone(), indexmap! {
+            unsafe { StructValue::new_unchecked(indexmap! {
                 id!("id") => ScalarValue::Int32(id).into(),
             }) }
         }
@@ -150,11 +153,11 @@ mod tests {
         let mut users = PagerRelation::new(user_schema.clone());
         let mut inactive_users = PagerRelation::new(user_schema.clone());
 
-        users.insert(&registry, new_user(&user_ttype_id, 0, false));
-        users.insert(&registry, new_user(&user_ttype_id, 1, true));
-        users.insert(&registry, new_user(&user_ttype_id, 2, true));
-        users.insert(&registry, new_user(&user_ttype_id, 3, false));
-        users.insert(&registry, new_user(&user_ttype_id, 4, true));
+        users.insert(&registry, new_user(0, false));
+        users.insert(&registry, new_user(1, true));
+        users.insert(&registry, new_user(2, true));
+        users.insert(&registry, new_user(3, false));
+        users.insert(&registry, new_user(4, true));
 
         let empty_forest = IdentForest::empty();
 
@@ -168,9 +171,9 @@ mod tests {
 
         let mut inactive_users_expected = PagerRelation::new(user_schema.clone());
 
-        let user_3 = new_user(&user_ttype_id, 3, false);
+        let user_3 = new_user(3, false);
 
-        inactive_users_expected.insert(&registry, new_user(&user_ttype_id, 0, false));
+        inactive_users_expected.insert(&registry, new_user(0, false));
         inactive_users_expected.insert(&registry, user_3.clone());
 
         assert_eq!(inactive_users_expected, inactive_users);
@@ -181,12 +184,12 @@ mod tests {
         // inactive_users.insert(&registry, Value::Composite(CompositeValue::new_struct(&registry, &TTypeId::Scalar(ScalarType::Bool), vec![FieldValue::new("id", Value::Scalar(ScalarValueInner::Int32(2)))]).unwrap())).unwrap_err();
 
         // check range
-        let users_range = users.range(&registry, users.schema.pkey(), new_id(&user_id_ttype_id, 1)..new_id(&user_id_ttype_id, 3)).enumerate().collect_vec();
+        let users_range = users.range(&registry, users.schema.pkey(), new_id(1)..new_id(3)).enumerate().collect_vec();
 
         assert_eq!(2, users_range.len());
 
         for (i, user) in users_range {
-            assert_eq!(user, new_user(&user_ttype_id, i as i32 + 1, true));
+            assert_eq!(user, new_user(i as i32 + 1, true));
         }
     }
 }

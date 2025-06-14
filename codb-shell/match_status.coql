@@ -1,0 +1,5 @@
+match UserStatus#Inactive(unit) {
+    Active(_) => "A",
+    Inactive(_) => "B",
+    Other(_) => "C",
+} -> string

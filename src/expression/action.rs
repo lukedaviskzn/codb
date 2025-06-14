@@ -3,7 +3,7 @@ use std::{fmt::Debug, ops::Bound, sync::{Arc, Mutex}};
 use codb_core::{Ident, IdentForest};
 use itertools::Itertools;
 
-use crate::{db::{pager::Pager, registry::{Registry, TTypeId}, relation::Relation, DbRelationSet}, typesystem::{function::Function, scope::{ScopeTypes, ScopeValues}, ttype::{ArrayType, EnumType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue, Value}, TypeError}};
+use crate::{db::{pager::Pager, registry::{CompositeTTypeId, Registry, TTypeId}, relation::Relation, DbRelationSet}, typesystem::{function::Function, scope::{ScopeTypes, ScopeValues}, ttype::{ArrayType, CompositeType, EnumType}, value::{ArrayValue, CompositeValue, EnumValue, ScalarValue, StructValue, Value}, TypeError}};
 
 use super::{EvalError, Expression};
 
@@ -111,8 +111,12 @@ impl InterpreterAction {
                     end_type.must_eq(&selection_type_id)?;
                 }
 
+                let array_type = TTypeId::new_anonymous(CompositeType::Array(
+                    ArrayType::new(relation.schema().ttype_id(), None)
+                ).into());
+
                 // returns variable length array of relation type
-                Ok(ArrayType::new(relation.schema().ttype_id(), None).into())
+                Ok(TTypeId::new_anonymous(ArrayType::new(relation.schema().ttype_id(), None).into()))
             },
             InterpreterAction::Insert {
                 relation,
@@ -132,7 +136,11 @@ impl InterpreterAction {
                 
                 let ttype = new_rows.eval_types(pager, registry, relations, scopes)?;
 
-                ttype.must_eq(&TTypeId::Array(Box::new(ArrayType::new(relation.schema().ttype_id(), None))))?;
+                ttype.must_eq(&TTypeId::Composite(CompositeTTypeId::Anonymous(
+                    Box::new(CompositeType::Array(
+                        ArrayType::new(relation.schema().ttype_id(), None)
+                    ))
+                )))?;
 
                 Ok(TTypeId::INT64)
             },
@@ -165,7 +173,7 @@ impl InterpreterAction {
                     });
                 }
 
-                condition.args()[0].ttype_id().must_eq(&row_ttype_id)?;
+                condition.args()[0].must_eq(&row_ttype_id)?;
                 condition.result_type().must_eq(&TTypeId::BOOL)?;
 
                 Ok(TTypeId::INT64)
@@ -205,13 +213,21 @@ impl InterpreterAction {
                     Bound::Unbounded => Bound::Unbounded,
                 };
 
-                let rows = relation.range(registry, ident_forest, (start.as_ref(), end.as_ref()));
-                let rows = rows.map(|row| row.into()).collect_vec();
+                let schema_ttype_id = relation.schema().ttype_id();
 
-                let array_ttype_id = ArrayType::new(relation.schema().ttype_id(), None).into();
+                let rows = relation.range(registry, ident_forest, (start.as_ref(), end.as_ref()));
+                let rows = rows.map(|row| Value::Composite(CompositeValue {
+                    ttype_id: schema_ttype_id.clone(),
+                    inner: row.into(),
+                })).collect_vec();
+
+                let array_ttype_id = TTypeId::new_anonymous(ArrayType::new(schema_ttype_id, None).into());
 
                 // SAFETY: eval_types should have already checked that this is valid
-                Ok(Value::Array(unsafe { ArrayValue::new_unchecked(array_ttype_id, rows) }))
+                Ok(Value::Composite(CompositeValue {
+                    ttype_id: array_ttype_id,
+                    inner: unsafe { ArrayValue::new_unchecked(rows) }.into(),
+                }))
             },
             InterpreterAction::Insert {
                 relation,
@@ -257,8 +273,17 @@ impl InterpreterAction {
                 let out = relation.remove(registry, &pkey.eval(pager, registry, relations, scopes)?.try_into().expect("primary key is not a struct"));
 
                 match out {
-                    Some(out) => Ok(EnumValue::new_option_some(option, out.into()).into()),
-                    None => Ok(EnumValue::new_option_none(option).into()),
+                    Some(out) => Ok(CompositeValue {
+                        ttype_id: option,
+                        inner: EnumValue::new_option_some(CompositeValue {
+                            ttype_id: relation.schema().ttype_id(),
+                            inner: out.into(),
+                        }.into()).into(),
+                    }.into()),
+                    None => Ok(CompositeValue {
+                        ttype_id: option,
+                        inner: EnumValue::new_option_none().into(),
+                    }.into()),
                 }
             },
             InterpreterAction::Retain {

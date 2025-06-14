@@ -39,14 +39,14 @@ impl FunctionInvocation {
 
         let mut arg_names = HashSet::new();
 
-        for (arg, expression) in function.args().iter().zip(self.args.iter()) {
+        for ((name, ttype_id), expression) in function.args().iter().zip(self.args.iter()) {
             let expression_type_id = expression.eval_types(pager.clone(), registry, relations, scopes)?;
 
-            arg.ttype_id().must_eq(&expression_type_id)?;
+            ttype_id.must_eq(&expression_type_id)?;
             
-            if !arg_names.insert(arg.name()) {
+            if !arg_names.insert(name) {
                 return Err(TypeError::FunctionDuplicateArg {
-                    arg: arg.name().clone(),
+                    arg: name.clone(),
                 });
             }
         }
@@ -80,7 +80,7 @@ impl Debug for FunctionInvocation {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::{db::{registry::Registry, DbRelationSet}, expression::{EnumLiteral, EvalError, Expression, Literal}, typesystem::value::ScalarValue};
+    use crate::{db::{registry::Registry, DbRelationSet}, expression::{CompositeLiteral, EnumLiteral, EvalError, Expression, Literal}, typesystem::value::ScalarValue};
 
     use super::*;
 
@@ -94,11 +94,15 @@ mod tests {
             function: id_path!("unwrap"),
             args: [
                 Expression::Literal(
-                    EnumLiteral::new(
-                        id_path!("Result").into(),
-                        id!("Err"),
-                        Expression::Literal(ScalarValue::String("my_error".into()).into()),
-                    ).into()
+                    Literal::Composite(
+                        CompositeLiteral {
+                            ttype_id: id_path!("Result").into(),
+                            inner: EnumLiteral::new(
+                                id!("Err"),
+                                Expression::Literal(ScalarValue::String("my_error".into()).into()),
+                            ).into(),
+                        }
+                    )
                 ),
             ].into(),
         });
@@ -114,11 +118,15 @@ mod tests {
             function: id_path!("unwrap"),
             args: [
                 Expression::Literal(
-                    EnumLiteral::new(
-                        id_path!("Result").into(),
-                        id!("Ok"),
-                        Expression::Literal(Literal::UNIT),
-                    ).into()
+                    Literal::Composite(
+                        CompositeLiteral {
+                            ttype_id: id_path!("Result").into(),
+                            inner: EnumLiteral::new(
+                                id!("Ok"),
+                                Expression::Literal(Literal::UNIT),
+                            ).into(),
+                        }
+                    )
                 ),
             ].into(),
         });

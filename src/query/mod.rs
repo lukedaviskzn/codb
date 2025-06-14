@@ -2,7 +2,7 @@ use std::{fmt::{Debug, Display}, ops::{Bound, RangeBounds}};
 
 use crate::{expression::{EvalError, Expression}, query::schema_query::{SchemaError, SchemaQuery}, typesystem::TypeError};
 
-pub mod lexer;
+pub mod lex;
 pub mod parser;
 pub mod schema_query;
 

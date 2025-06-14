@@ -2,7 +2,7 @@ use std::{fs::{self, File}, path::PathBuf};
 
 use ariadne::{Label, Source};
 use clap::Parser;
-use codb::{query::parser::ParseError, ConnectionExecutionError};
+use codb::{query::{parser::ParseError, Span}, ConnectionExecutionError};
 use rustyline::DefaultEditor;
 
 #[derive(Debug, clap::Parser)]
@@ -79,28 +79,29 @@ fn main() -> anyhow::Result<()> {
 
 fn print_connection_error(err: &ConnectionExecutionError, query: &str) {
     match err {
-        ConnectionExecutionError::ParseError(err) => print_parse_error(err, query),
+        ConnectionExecutionError::LexError(err) => print_error_report(err.span, err.kind.to_string(), query),
+        ConnectionExecutionError::ParseError(err) => print_error_report(err.span, err.kind.to_string(), query),
         ConnectionExecutionError::QueryExecutionError(err) => println!("{err}"),
     }
 }
 
-fn print_parse_error(err: &ParseError, query: &str) {
-    let context_start = err.span.start.checked_sub(100).unwrap_or_default();
+fn print_error_report(span: Span, message: String, query: &str) {
+    let context_start = span.start.checked_sub(100).unwrap_or_default();
     let context_end = (
         context_start + 100 +
-        err.span.length.unwrap_or_default()
+        span.length.unwrap_or_default()
     ).min(query.len());
     
     let context_span = context_start..context_end;
     
-    let span = if let Some(len) = err.span.length {
-        err.span.start..(err.span.start + len)
+    let span = if let Some(len) = span.length {
+        span.start..(span.start + len)
     } else {
-        err.span.start..query.chars().count()
+        span.start..query.chars().count()
     };
     
     let report = ariadne::Report::build(ariadne::ReportKind::Error, ("query", context_span))
-        .with_message(err.kind.to_string())
+        .with_message(message)
         .with_label(
             Label::new(("query", span))
                 .with_message("error occurred here")

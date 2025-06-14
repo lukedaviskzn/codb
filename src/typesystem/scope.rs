@@ -133,15 +133,7 @@ impl<'a> ScopeValues<'a> {
         let mut scopes = Vec::new();
 
         for scope in &self.scopes {
-            let TTypeId::Composite(CompositeTTypeId::Anonymous(ttype)) = scope.ttype_id() else {
-                unreachable!("Scope type is not anonymous!");
-            };
-
-            let CompositeType::Struct(ttype) = *ttype else {
-                unreachable!("Scope type is not a struct!");
-            };
-            
-            scopes.push(Cow::Owned(ttype));
+            scopes.push(Cow::Owned(scope.ttype()));
         }
 
         ScopeTypes {

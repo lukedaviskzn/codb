@@ -1,4 +1,4 @@
-use std::{fmt::{Debug, Display}, iter::{Enumerate, Peekable}, num::ParseIntError, ops::{Deref, DerefMut}};
+use std::{fmt::{Debug, Display}, num::ParseIntError};
 
 use codb_core::Ident;
 
@@ -230,15 +230,68 @@ impl Debug for Symbol {
     }
 }
 
-pub(crate) struct Lexer<T: Iterator<Item = char>> {
-    inner: Peekable<LexerInner<T>>,
+fn expect_next(chars: &mut impl Iterator<Item = (usize, char)>) -> Result<(usize, char), LexError> {
+    chars.next().ok_or(LexError {
+        span: (..).into(),
+        context: None,
+        kind: LexErrorKind::UnexpectedEnd,
+    })
 }
 
-impl<T: Iterator<Item = char>> Lexer<T> {
-    pub fn new(chars: T) -> Self {
+fn expect_char(chars: &mut impl Iterator<Item = (usize, char)>, char: char) -> Result<usize, LexError> {
+    let (index, next_char) = expect_next(chars)?;
+    
+    if next_char != char {
+        return Err(LexError {
+            span: Span::at(index),
+            context: None,
+            kind: LexErrorKind::ExpectedChar {
+                expected: char,
+                got: next_char,
+            }
+        });
+    }
+    
+    Ok(index)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TokenSlice<'a> {
+    inner: &'a [Token],
+    start: usize,
+}
+
+impl<'a> TokenSlice<'a> {
+    pub fn from_slice(slice: &'a [Token]) -> Self {
         Self {
-            inner: LexerInner::new(chars).peekable(),
+            inner: slice,
+            start: 0,
         }
+    }
+
+    pub fn peek(&mut self) -> Option<&Token> {
+        self.inner.get(self.start)
+    }
+
+    pub fn next_if(&mut self, function: impl Fn(&Token) -> bool) -> Option<Token> {
+        let token = self.peek()?;
+        if function(token) {
+            self.next()
+        } else {
+            None
+        }
+    }
+    
+    pub fn next_if_token_tag(&mut self, tag: TokenTag) -> Option<Token> {
+        self.next_if(|token| token.kind.tag() == tag)
+    }
+
+    pub fn next_if_token_kind(&mut self, kind: &TokenKind) -> Option<Token> {
+        self.next_if(|token| token.kind == *kind)
+    }
+
+    pub fn next_if_symbol(&mut self, symbol: Symbol) -> Option<Token> {
+        self.next_if_token_kind(&TokenKind::Symbol(symbol))
     }
 
     pub fn expect_peek(&mut self) -> Result<&Token, ParseError> {
@@ -246,7 +299,7 @@ impl<T: Iterator<Item = char>> Lexer<T> {
             span: Span::ALL,
             context: None,
             kind: ParseErrorKind::UnexpectedEnd,
-        })?.as_ref().map_err(|err| err.clone())?;
+        })?;
 
         Ok(token)
     }
@@ -256,7 +309,7 @@ impl<T: Iterator<Item = char>> Lexer<T> {
             span: Span::ALL,
             context: None,
             kind: ParseErrorKind::UnexpectedEnd,
-        })??;
+        })?;
 
         Ok(token)
     }
@@ -306,131 +359,57 @@ impl<T: Iterator<Item = char>> Lexer<T> {
         let span = self.expect_token_kind(&TokenKind::Keyword(keyword))?;
         Ok(span)
     }
+}
+
+impl<'a> From<&'a [Token]> for TokenSlice<'a> {
+    fn from(slice: &'a [Token]) -> Self {
+        Self::from_slice(slice)
+    }
+}
+
+impl<'a> Iterator for TokenSlice<'a> {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let token = self.inner.get(self.start);
+        self.start += 1;
+        token.cloned()
+    }
+}
+
+pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, LexError> {
+    let mut chars = chars.enumerate().peekable();
     
-    pub fn next_if_token_tag(&mut self, tag: TokenTag) -> Result<Option<Token>, ParseError> {
-        let token = self.next_if(|token| match token {
-            Ok(token) if token.kind.tag() == tag => true,
-            _ => false,
-        });
+    let mut tokens = vec![];
 
-        match token {
-            Some(Ok(ok)) => Ok(Some(ok)),
-            Some(Err(err)) => Err(err.into()),
-            None => Ok(None),
-        }
-    }
-
-    pub fn next_if_token_kind(&mut self, kind: &TokenKind) -> Result<Option<Token>, ParseError> {
-        let token = self.next_if(|token| match token {
-            Ok(token) if token.kind == *kind => true,
-            _ => false,
-        });
-
-        match token {
-            Some(Ok(ok)) => Ok(Some(ok)),
-            Some(Err(err)) => Err(err.into()),
-            None => Ok(None),
-        }
-    }
-
-    pub fn next_if_symbol(&mut self, symbol: Symbol) -> Result<Option<Span>, ParseError> {
-        let Some(token) = self.next_if_token_kind(&TokenKind::Symbol(symbol))? else { return Ok(None) };
-        Ok(Some(token.span))
-    }
-}
-
-impl<T: Iterator<Item = char>> Deref for Lexer<T> {
-    type Target = Peekable<LexerInner<T>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<T: Iterator<Item = char>> DerefMut for Lexer<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-impl<T: Iterator<Item = char>> Iterator for Lexer<T> {
-    type Item = Result<Token, LexError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
-    }
-}
-
-    pub(crate) struct LexerInner<T: Iterator<Item = char>> {
-    chars: Peekable<Enumerate<T>>,
-}
-
-impl<T: Iterator<Item = char>> LexerInner<T> {
-    fn new(chars: T) -> Self {
-        Self {
-            chars: chars.enumerate().peekable(),
-        }
-    }
-
-    fn expect_next(&mut self) -> Result<(usize, char), LexError> {
-        self.chars.next().ok_or(LexError {
-            span: (..).into(),
-            context: None,
-            kind: LexErrorKind::UnexpectedEnd,
-        })
-    }
-
-    fn expect_char(&mut self, char: char) -> Result<usize, LexError> {
-        let (index, next_char) = self.expect_next()?;
-        
-        if next_char != char {
-            return Err(LexError {
-                span: Span::at(index),
-                context: None,
-                kind: LexErrorKind::ExpectedChar {
-                    expected: char,
-                    got: next_char,
-                }
-            });
-        }
-        
-        Ok(index)
-    }
-}
-
-impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
-    type Item = Result<Token, LexError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let (index, next_char) = self.chars.next()?;
-        
+    while let Some((index, next_char)) = chars.next() {
         // whitespace
         if next_char.is_whitespace() {
             // consume all whitespace
-            while let Some(_) = self.chars.next_if(|(_, c)| c.is_whitespace()) {}
-            return self.next();
+            while let Some(_) = chars.next_if(|(_, c)| c.is_whitespace()) {}
+            continue;
         }
 
         if next_char == '/' {
-            if let Some((_, char_after)) = self.chars.peek() {
+            if let Some((_, char_after)) = chars.peek() {
                 if *char_after == '/' {
                     // consume all chars until new line
-                    while let Some(_) = self.chars.next_if(|(_, c)| *c != '\n') {}
-                    return self.next();
+                    while let Some(_) = chars.next_if(|(_, c)| *c != '\n') {}
+                    continue;
                 } else if *char_after == '*' {
                     let mut nesting = 1;
                     // consume all chars until */
-                    while let Some((_, first)) = self.chars.next() {
+                    while let Some((_, first)) = chars.next() {
                         if nesting <= 0 {
                             break;
                         }
                         if first == '*' {
-                            if let Some((_, '/')) = self.chars.peek() {
+                            if let Some((_, '/')) = chars.peek() {
                                 nesting -= 1;
                             }
                         }
                     }
-                    return self.next();
+                    continue;
                 }
             }
         }
@@ -444,7 +423,7 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
             let mut ident = String::from(next_char);
             let mut ident_len = 1;
 
-            while let Some((_, char)) = self.chars.next_if(|(_, c)| c.is_alphanumeric() || *c == '_') {
+            while let Some((_, char)) = chars.next_if(|(_, c)| c.is_alphanumeric() || *c == '_') {
                 ident.push(char);
                 ident_len += 1;
             }
@@ -488,23 +467,23 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
 
             let mut number_string = String::from(next_char);
 
-            while let Some((_, char)) = self.chars.next_if(|(_, c)| c.is_numeric() || *c == '_') {
+            while let Some((_, char)) = chars.next_if(|(_, c)| c.is_numeric() || *c == '_') {
                 if char.is_numeric() {
                     number_string.push(char);
                 }
                 number_string_length += 1;
             }
 
-            let i_index = match self.expect_char('i') {
+            let i_index = match expect_char(&mut chars, 'i') {
                 Ok(index) => index,
-                Err(err) => return Some(Err(err.with_context(LexContext::LexingInteger))),
+                Err(err) => return Err(err.with_context(LexContext::LexingInteger)),
             };
 
             let mut number_bit_string_length = 0;
 
             let mut number_bits_string = String::new();
 
-            while let Some((_, char)) = self.chars.next_if(|(_, c)| c.is_numeric() || *c == '_') {
+            while let Some((_, char)) = chars.next_if(|(_, c)| c.is_numeric() || *c == '_') {
                 if char.is_numeric() {
                     number_bits_string.push(char);
                 }
@@ -513,20 +492,20 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
 
             let number: i64 = match number_string.parse() {
                 Ok(number) => number,
-                Err(err) => return Some(Err(LexError {
+                Err(err) => return Err(LexError {
                     span: Span::with_len(index, number_string_length),
                     context: Some(LexContext::LexingInteger),
                     kind: LexErrorKind::ParseIntError(err),
-                })),
+                }),
             };
 
             let number_bits: u8 = match number_bits_string.parse() {
                 Ok(number) => number,
-                Err(err) => return Some(Err(LexError {
+                Err(err) => return Err(LexError {
                     span: Span::with_len(index, number_string_length),
                     context: Some(LexContext::LexingInteger),
                     kind: LexErrorKind::ParseIntError(err),
-                })),
+                }),
             };
 
             match number_bits {
@@ -538,11 +517,11 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
                     span: Span::with_len(i_index + 1, number_bit_string_length),
                     kind: TokenKind::ScalarLiteral(ScalarValue::Int64(number)),
                 }),
-                bits => return Some(Err(LexError {
+                bits => return Err(LexError {
                     span: Span::with_len(i_index + 1, number_bit_string_length),
                     context: Some(LexContext::LexingInteger),
                     kind: LexErrorKind::IntegerBits(bits),
-                })),
+                }),
             }
         }
 
@@ -553,12 +532,12 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
             let mut token_length = 1;
 
             loop {
-                let Some((index, next_char)) = self.chars.next() else {
-                    return Some(Err(LexError {
+                let Some((index, next_char)) = chars.next() else {
+                    return Err(LexError {
                         span: Span::beyond(index),
                         context: Some(LexContext::LexingString),
                         kind: LexErrorKind::UnexpectedEnd,
-                    }));
+                    });
                 };
 
                 token_length += 1;
@@ -572,13 +551,13 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
                     continue;
                 }
 
-                let Some((index, next_char)) = self.chars.next() else {
+                let Some((index, next_char)) = chars.next() else {
                     token_length += 1;
-                    return Some(Err(LexError {
+                    return Err(LexError {
                         span: Span::beyond(index),
                         context: Some(LexContext::LexingString),
                         kind: LexErrorKind::UnexpectedEnd,
-                    }));
+                    });
                 };
 
                 let replacement_char = match next_char {
@@ -590,13 +569,13 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
                     '\'' => '\'',
                     '"' => '"',
                     'x' => {
-                        let (_, first_char) = match self.expect_next() {
+                        let (_, first_char) = match expect_next(&mut chars) {
                             Ok(next) => next,
-                            Err(err) => return Some(Err(err.with_context(LexContext::LexingString))),
+                            Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
-                        let (index, second_char) = match self.expect_next() {
+                        let (index, second_char) = match expect_next(&mut chars) {
                             Ok(next) => next,
-                            Err(err) => return Some(Err(err.with_context(LexContext::LexingString))),
+                            Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
                         token_length += 2;
 
@@ -605,32 +584,32 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
 
                         let byte = match u8::from_str_radix(&hex_string, 16) {
                             Ok(byte) => byte,
-                            Err(err) => return Some(Err(LexError {
+                            Err(err) => return Err(LexError {
                                 span: Span::with_len(index-3, 4),
                                 context: Some(LexContext::LexingString),
                                 kind: LexErrorKind::ParseIntError(err),
-                            })),
+                            }),
                         };
 
                         byte as char
                     },
                     'u' => {
                         
-                        let (_, first_char) = match self.expect_next() {
+                        let (_, first_char) = match expect_next(&mut chars) {
                             Ok(next) => next,
-                            Err(err) => return Some(Err(err.with_context(LexContext::LexingString))),
+                            Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
-                        let (_, second_char) = match self.expect_next() {
+                        let (_, second_char) = match expect_next(&mut chars) {
                             Ok(next) => next,
-                            Err(err) => return Some(Err(err.with_context(LexContext::LexingString))),
+                            Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
-                        let (_, third_char) = match self.expect_next() {
+                        let (_, third_char) = match expect_next(&mut chars) {
                             Ok(next) => next,
-                            Err(err) => return Some(Err(err.with_context(LexContext::LexingString))),
+                            Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
-                        let (index, fourth_char) = match self.expect_next() {
+                        let (index, fourth_char) = match expect_next(&mut chars) {
                             Ok(next) => next,
-                            Err(err) => return Some(Err(err.with_context(LexContext::LexingString))),
+                            Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
                         token_length += 4;
 
@@ -641,27 +620,27 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
 
                         let char_u32 = match u32::from_str_radix(&hex_string, 16) {
                             Ok(byte) => byte,
-                            Err(err) => return Some(Err(LexError {
+                            Err(err) => return Err(LexError {
                                 span: Span::with_len(index-5, 6),
                                 context: Some(LexContext::LexingString),
                                 kind: LexErrorKind::ParseIntError(err),
-                            })),
+                            }),
                         };
 
                         match char::from_u32(char_u32) {
                             Some(c) => c,
-                            None => return Some(Err(LexError {
+                            None => return Err(LexError {
                                 span: Span::with_len(index-5, 6),
                                 context: Some(LexContext::LexingString),
                                 kind: LexErrorKind::NotUnicode(char_u32),
-                            })),
+                            }),
                         }
                     },
-                    c => return Some(Err(LexError {
+                    c => return Err(LexError {
                         span: Span::at(index),
                         context: Some(LexContext::LexingString),
                         kind: LexErrorKind::UnexpectedChar(c),
-                    }))
+                    }),
                 };
 
                 string_contents.push(replacement_char);
@@ -689,7 +668,7 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
 
         if next_char == ':' {
             // symbol '::'
-            if let Some((_, _)) = self.chars.next_if(|(_, c)| *c == ':') {
+            if let Some((_, _)) = chars.next_if(|(_, c)| *c == ':') {
                 token = Some(Token {
                     span: Span::with_len(index, 2),
                     kind: TokenKind::Symbol(Symbol::PathSep),
@@ -753,7 +732,7 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
 
         if next_char == '-' {
             // symbol '->'
-            if let Some((_, _)) = self.chars.next_if(|(_, c)| *c == '>') {
+            if let Some((_, _)) = chars.next_if(|(_, c)| *c == '>') {
                 token = Some(Token {
                     span: Span::with_len(index, 2),
                     kind: TokenKind::Symbol(Symbol::RightArrow),
@@ -781,13 +760,13 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
         }
 
         if next_char == '=' {
-            if let Some((_, _)) = self.chars.next_if(|(_, c)| *c == '=') {
+            if let Some((_, _)) = chars.next_if(|(_, c)| *c == '=') {
                 // symbol '=='
                 token = Some(Token {
                     span: Span::with_len(index, 2),
                     kind: TokenKind::Symbol(Symbol::DoubleEqual),
                 });
-            } else if let Some((_, _)) = self.chars.next_if(|(_, c)| *c == '>') {
+            } else if let Some((_, _)) = chars.next_if(|(_, c)| *c == '>') {
                 // symbol '=>'
                 token = Some(Token {
                     span: Span::with_len(index, 2),
@@ -804,7 +783,7 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
 
         if next_char == '<' {
             // symbol '<='
-            if let Some((_, _)) = self.chars.next_if(|(_, c)| *c == '=') {
+            if let Some((_, _)) = chars.next_if(|(_, c)| *c == '=') {
                 token = Some(Token {
                     span: Span::with_len(index, 2),
                     kind: TokenKind::Symbol(Symbol::LessThanOrEqual),
@@ -819,7 +798,7 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
 
         if next_char == '>' {
             // symbol '>='
-            if let Some((_, _)) = self.chars.next_if(|(_, c)| *c == '=') {
+            if let Some((_, _)) = chars.next_if(|(_, c)| *c == '=') {
                 token = Some(Token {
                     span: Span::with_len(index, 2),
                     kind: TokenKind::Symbol(Symbol::GreaterThanOrEqual),
@@ -840,8 +819,8 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
         }
 
         if next_char == '&' {
-            if let Err(err) = self.expect_char('&') {
-                return Some(Err(err.with_context(LexContext::LexingSymbol)));
+            if let Err(err) = expect_char(&mut chars, '&') {
+                return Err(err.with_context(LexContext::LexingSymbol));
             }
             token = Some(Token {
                 span: Span::with_len(index, 2),
@@ -850,8 +829,8 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
         }
 
         if next_char == '|' {
-            if let Err(err) = self.expect_char('|') {
-                return Some(Err(err.with_context(LexContext::LexingSymbol)));
+            if let Err(err) = expect_char(&mut chars, '|') {
+                return Err(err.with_context(LexContext::LexingSymbol));
             }
             token = Some(Token {
                 span: Span::with_len(index, 2),
@@ -866,22 +845,28 @@ impl<T: Iterator<Item = char>> Iterator for LexerInner<T> {
             });
         }
 
-        Some(token.ok_or_else(|| LexError {
-            span: Span::at(index),
-            context: None,
-            kind: LexErrorKind::UnexpectedChar(next_char),
-        }))
+        if let Some(token) = token {
+            tokens.push(token)
+        } else {
+            return Err(LexError {
+                span: Span::at(index),
+                context: None,
+                kind: LexErrorKind::UnexpectedChar(next_char),
+            });
+        }
     }
+
+    Ok(tokens.into())
 }
 
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;
 
-    use super::Lexer;
+    use crate::query::lex::lex;
 
     #[test]
-    fn lex() {
+    fn lex_test() {
         let text_string = r#"
         value = (anon[struct { active: bool, id: int32, name: string }][])[
             anon[struct { active: bool, id: int32, name: string }] {
@@ -902,7 +887,8 @@ mod tests {
         ]
         "#;
 
-        let token_kinds = Lexer::new(text_string.chars()).map(|t| t.unwrap().kind).collect_vec();
+        let token_kinds = lex(text_string.chars()).expect("failed to lex")
+            .into_iter().map(|token| token.kind).collect_vec();
 
         use super::TokenKind as T;
         use super::Symbol as S;

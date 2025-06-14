@@ -1,6 +1,6 @@
 use std::{fmt::Debug, fs::File, io, num::NonZeroUsize};
 
-use crate::{db::{pager::Pager, Db}, query::{lexer::LexerInner, parser::{ParseError, Parser}, DataQuery, Query, QueryExecutionError}, typesystem::value::Value};
+use crate::{db::{pager::Pager, Db}, query::{lex::{lex, LexError, TokenSlice}, parser::{ExpressionArgs, Parse, ParseError}, schema_query::SchemaQuery, DataQuery, Query, QueryExecutionError}, typesystem::value::Value};
 
 pub mod query;
 
@@ -26,6 +26,8 @@ extern crate static_assertions;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectionExecutionError {
+    #[error("Lex Error: {0}")]
+    LexError(#[from] LexError),
     #[error("Parse Error: {0}")]
     ParseError(#[from] ParseError),
     #[error("{0}")]
@@ -57,14 +59,17 @@ impl Connection {
 
     pub fn execute(&self, query: &str) -> Result<Value, ConnectionExecutionError> {
         let expr = {
-            let lexer = LexerInner::new(query.chars());
-            let mut parser = Parser::new(lexer);
-
             let manifest = self.db.manifest();
             let registry = manifest.registry();
             let relations = manifest.relations(self.db.pager().clone());
+            
+            let tokens = lex(query.chars())?;
+            let (DataQuery(expr), _) = DataQuery::parse(&mut TokenSlice::from(&*tokens), ExpressionArgs {
+                pager: self.db.pager().clone(),
+                registry,
+                relations: &*relations,
+            })?;
 
-            let expr = parser.parse_data_query(self.db.pager().clone(), registry, &*relations)?;
             expr
         };
 
@@ -72,10 +77,8 @@ impl Connection {
     }
 
     pub fn execute_schema(&self, query: &str) -> Result<Value, ConnectionExecutionError> {
-        let lexer = LexerInner::new(query.chars());
-        let mut parser = Parser::new(lexer);
-
-        let query = parser.parse_schema_query()?;
+        let tokens = lex(query.chars())?;
+        let (query, _) = SchemaQuery::parse(&mut TokenSlice::from(&*tokens), ())?;
 
         Ok(self.db.execute(Query::Schema(query))?)
     }

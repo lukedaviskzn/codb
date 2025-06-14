@@ -167,22 +167,11 @@ impl MatchControlFlow {
     }
 
     pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        let scope_types = scopes.types();
-        
-        let param_type = self.param.eval_types(pager.clone(), registry, relations, &scope_types).expect("failed to evaluate match parameter type");
-        let param_type = registry.ttype(&param_type).expect("match parameter type not found");
-        let param_type: EnumType = param_type.try_into().expect("match parameter type is not an enum");
-        
         let param_value: EnumValue = self.param.eval(pager.clone(), registry, relations, scopes)?.try_into().expect("match paramter value is not an enum value");
 
         let branch = self.branches.get(param_value.tag()).expect("branch not found");
 
-        let scope_type = TTypeId::new_anonymous(StructType::new(indexmap! {
-            branch.ident.clone() => param_type.tags()[param_value.tag()].clone(),
-        }).into());
-        
-        // SAFETY: eval_types should have already checked that this value is valid
-        let new_scope = unsafe { StructValue::new_unchecked(scope_type, indexmap! {
+        let new_scope = unsafe { StructValue::new_unchecked(indexmap! {
             branch.ident.clone() => param_value.into_inner_value(),
         }) };
 
@@ -217,7 +206,7 @@ impl Debug for Branch {
 
 #[cfg(test)]
 mod tests {
-    use crate::{db::DbRelationSet, expression::{EnumLiteral, Literal}, typesystem::value::ScalarValue};
+    use crate::{db::DbRelationSet, expression::{CompositeLiteral, EnumLiteral, Literal}, typesystem::value::ScalarValue};
 
     use super::*;
 
@@ -230,11 +219,15 @@ mod tests {
         let result_ttype_id = TTypeId::from(id_path!("Result"));
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
-            param: Expression::Literal(EnumLiteral::new(
-                result_ttype_id.clone(),
-                id!("Ok"),
-                Expression::Literal(Literal::UNIT)
-            ).into()),
+            param: Expression::Literal(Literal::Composite(
+                CompositeLiteral {
+                    ttype_id: result_ttype_id.clone(),
+                    inner: EnumLiteral::new(
+                        id!("Ok"),
+                        Expression::Literal(Literal::UNIT)
+                    ).into(),
+                }
+            )),
             ret_type: TTypeId::INT32,
             branches: btreemap! {
                 id!("Ok") => Branch::new(id!("_"), Expression::Literal(ScalarValue::Int32(10).into())),
@@ -247,7 +240,15 @@ mod tests {
 
         let expr = Expression::ControlFlow(Box::new(
             ControlFlow::Match(MatchControlFlow {
-                param: Expression::Literal(EnumLiteral::new(result_ttype_id, id!("Ok"), Expression::Literal(Literal::UNIT)).into()),
+                param: Expression::Literal(Literal::Composite(
+                    CompositeLiteral {
+                        ttype_id: result_ttype_id,
+                        inner: EnumLiteral::new(
+                            id!("Ok"),
+                            Expression::Literal(Literal::UNIT),
+                        ).into(),
+                    }
+                )),
                 ret_type: TTypeId::INT32,
                 branches: btreemap! {
                     id!("Ok") => Branch::new(id!("_"), Expression::Literal(ScalarValue::Int32(10).into())),
@@ -258,13 +259,15 @@ mod tests {
         assert_eq!(TypeError::MissingTag(id!("Err")), expr.eval_types(pager.clone(), &registry, &relations, &ScopeTypes::EMPTY).unwrap_err());
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
-            param: Expression::Literal(
-                EnumLiteral::new(
-                    id_path!("Result").into(),
-                    id!("Err"),
-                    Expression::Literal(ScalarValue::String("my_error".into()).into()),
-                ).into()
-            ),
+            param: Expression::Literal(Literal::Composite(
+                CompositeLiteral {
+                    ttype_id: id_path!("Result").into(),
+                    inner: EnumLiteral::new(
+                        id!("Err"),
+                        Expression::Literal(ScalarValue::String("my_error".into()).into()),
+                    ).into(),
+                }
+            )),
             ret_type: TTypeId::STRING,
             branches: btreemap! {
                 id!("Ok") => Branch::new(id!("_"), Expression::Literal(ScalarValue::String("Ok".into()).into())),

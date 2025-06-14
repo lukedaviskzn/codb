@@ -3,9 +3,9 @@ use std::{fmt::Debug, sync::{Arc, Mutex}};
 use codb_core::{Ident, IdentPath};
 use module::Module;
 
-mod module;
+pub mod module;
 
-use crate::{expression::{Branch, ControlFlow, Expression, InterpreterAction, Literal, MatchControlFlow}, typesystem::{function::{Function, FunctionArg}, ttype::{ArrayType, CompositeType, EnumType, ScalarType, TType}, TypeError}};
+use crate::{expression::{Branch, ControlFlow, Expression, InterpreterAction, Literal, MatchControlFlow}, typesystem::{function::Function, ttype::{ArrayType, CompositeType, EnumType, ScalarType, TType}, TypeError}};
 
 use super::{pager::Pager, DbRelationSet};
 
@@ -16,8 +16,6 @@ pub enum TTypeId {
     Scalar(ScalarType),
     #[brw(magic = 1u8)]
     Composite(CompositeTTypeId),
-    #[brw(magic = 2u8)]
-    Array(Box<ArrayType>),
 }
 
 impl TTypeId {
@@ -32,7 +30,6 @@ impl TTypeId {
         match ttype {
             TType::Composite(composite_type) => TTypeId::Composite(CompositeTTypeId::Anonymous(Box::new(composite_type))),
             TType::Scalar(scalar_type) => TTypeId::Scalar(scalar_type),
-            TType::Array(array_type) => TTypeId::Array(Box::new(array_type)),
         }
     }
 
@@ -40,16 +37,29 @@ impl TTypeId {
         match self {
             this if this == expected => true,
             this if this == &TTypeId::NEVER => true,
-            TTypeId::Array(this) => if let TTypeId::Array(expected) = expected {
-                this.inner_ttype_id().compatible_with(expected.inner_ttype_id())
-                &&
-                if expected.length().is_some() {
-                    this.length() == expected.length()
-                } else {
-                    true
+            TTypeId::Composite(CompositeTTypeId::Anonymous(ttype)) => {
+                match &**ttype {
+                    CompositeType::Array(this) => {
+                        match expected {
+                            TTypeId::Composite(CompositeTTypeId::Anonymous(expected)) => {
+                                match &**expected {
+                                    CompositeType::Array(expected) => {
+                                        this.inner_ttype_id().compatible_with(expected.inner_ttype_id())
+                                        &&
+                                        if expected.length().is_some() {
+                                            this.length() == expected.length()
+                                        } else {
+                                            true
+                                        }
+                                    },
+                                    _ => false, 
+                                }
+                            },
+                            _ => false
+                        }
+                    },
+                    _ => false,
                 }
-            } else {
-                false
             },
             _ => false,
         }
@@ -72,7 +82,6 @@ impl Debug for TTypeId {
         match self {
             Self::Scalar(ttype) => Debug::fmt(ttype, f),
             Self::Composite(ttype) => Debug::fmt(ttype, f),
-            Self::Array(ttype) => Debug::fmt(ttype, f),
         }
     }
 }
@@ -92,12 +101,6 @@ impl From<CompositeTTypeId> for TTypeId {
 impl From<IdentPath> for TTypeId {
     fn from(path: IdentPath) -> Self {
         TTypeId::Composite(path.into())
-    }
-}
-
-impl From<ArrayType> for TTypeId {
-    fn from(ttype: ArrayType) -> Self {
-        TTypeId::Array(Box::new(ttype))
     }
 }
 
@@ -148,7 +151,9 @@ impl Registry {
                 pager,
                 &registry,
                 relations,
-                [FunctionArg::new(id!("result"), id_path!("Result").into())],
+                indexmap! {
+                    id!("result") => id_path!("Result").into(),
+                },
                 TTypeId::UNIT,
                 Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
                     param: Expression::NestedIdent(id!("result").into()),
@@ -175,7 +180,6 @@ impl Registry {
         Some(module)
     }
 
-    #[allow(unused)]
     pub fn module_mut(&mut self, path: &[Ident]) -> Option<&mut Module> {
         let mut module = &mut self.root;
 
@@ -198,7 +202,6 @@ impl Registry {
                     module.ttype(ttype_name).cloned().map(|ttype| ttype.into())
                 },
             },
-            TTypeId::Array(array_type) => Some((**array_type).clone().into()),
         }
     }
 

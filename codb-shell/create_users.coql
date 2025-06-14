@@ -1,0 +1,12 @@
+.schema type UserStatus = enum {
+    Active: unit,
+    Inactive: unit,
+    Other: string,
+}
+
+
+.schema relation Users = struct {
+    id: int32,
+    name: string,
+    status: UserStatus,
+} <id>

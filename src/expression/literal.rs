@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt::Debug, sync::{Arc, Mutex}};
 
 use codb_core::Ident;
 
-use crate::{db::{pager::Pager, registry::{Registry, TTypeId}, DbRelationSet}, expression::Expression, typesystem::{scope::{ScopeTypes, ScopeValues}, ttype::{EnumType, StructType, TType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue, Value}, TypeError, TypeSet}};
+use crate::{db::{pager::Pager, registry::{CompositeTTypeId, Registry, TTypeId}, DbRelationSet}, expression::Expression, typesystem::{scope::{ScopeTypes, ScopeValues}, ttype::{ArrayType, CompositeType, EnumType, StructType, TType}, value::{ArrayValue, CompositeValue, CompositeValueInner, EnumValue, ScalarValue, StructValue, Value}, TypeError, TypeSet}};
 
 use super::EvalError;
 
@@ -14,8 +14,6 @@ pub enum Literal {
     Composite(CompositeLiteral),
     #[brw(magic = 1u8)]
     Scalar(ScalarValue),
-    #[brw(magic = 2u8)]
-    Array(ArrayLiteral),
 }
 
 impl Literal {
@@ -27,15 +25,13 @@ impl Literal {
         match self {
             Literal::Composite(literal) => literal.eval_types(pager, registry, relations, scopes),
             Literal::Scalar(literal) => Ok(literal.ttype_id()),
-            Literal::Array(literal) => literal.eval_types(pager, registry, relations, scopes),
         }
     }
 
     pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
         match self {
-            Literal::Composite(literal) => literal.eval(pager, registry, relations, scopes),
+            Literal::Composite(literal) => Ok(Value::Composite(literal.eval(pager, registry, relations, scopes)?)),
             Literal::Scalar(literal) => Ok(literal.clone().into()),
-            Literal::Array(literal) => literal.eval(pager, registry, relations, scopes),
         }
     }
 }
@@ -45,7 +41,6 @@ impl Debug for Literal {
         match self {
             Self::Composite(val) => Debug::fmt(val, f),
             Self::Scalar(val) => Debug::fmt(val, f),
-            Self::Array(val) => Debug::fmt(val, f),
         }
     }
 }
@@ -56,73 +51,112 @@ impl From<CompositeLiteral> for Literal {
     }
 }
 
-impl From<StructLiteral> for Literal {
-    fn from(value: StructLiteral) -> Self {
-        Self::Composite(CompositeLiteral::Struct(value))
-    }
-}
-
-impl From<EnumLiteral> for Literal {
-    fn from(value: EnumLiteral) -> Self {
-        Self::Composite(CompositeLiteral::Enum(value))
-    }
-}
-
 impl From<ScalarValue> for Literal {
     fn from(value: ScalarValue) -> Self {
         Self::Scalar(value)
     }
 }
 
-impl From<ArrayLiteral> for Literal {
-    fn from(value: ArrayLiteral) -> Self {
-        Self::Array(value)
-    }
-}
-
 #[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum CompositeLiteral {
-    #[brw(magic = 0u8)]
-    Struct(StructLiteral),
-    #[brw(magic = 1u8)]
-    Enum(EnumLiteral),
+pub struct CompositeLiteral {
+    pub ttype_id: TTypeId,
+    pub inner: CompositeLiteralInner,
 }
 
 impl CompositeLiteral {
     pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
-        match self {
-            CompositeLiteral::Struct(literal) => literal.eval_types(pager, registry, relations, scopes),
-            CompositeLiteral::Enum(literal) => literal.eval_types(pager, registry, relations, scopes),
+        let ttype = registry.ttype(&self.ttype_id).ok_or_else(|| TypeError::TypeNotFound(self.ttype_id.clone()))?;
+
+        match (
+            ttype,
+            &self.inner,
+            // &self.inner.eval_types(pager.clone(), registry, relations, scopes)?,
+        ) {
+            (
+                TType::Composite(CompositeType::Struct(ttype)),
+                CompositeLiteralInner::Struct(literal),
+                // CompositeType::Struct(literal_type),
+            ) => {
+                // check literal fields are expected in type and check types
+                for (field, expr) in &literal.fields {
+                    let field_ttype_id = ttype.fields().get(field).ok_or_else(|| TypeError::UnknownField(field.clone()))?;
+                    expr.eval_types(pager.clone(), registry, relations, scopes)?.must_eq(field_ttype_id);
+                }
+
+                // check no fields missing
+                for field in ttype.fields().keys() {
+                    if !literal.fields.contains_key(field) {
+                        return Err(TypeError::MissingField(field.clone()));
+                    }
+                }
+
+                Ok(self.ttype_id.clone())
+            },
+            (
+                TType::Composite(CompositeType::Enum(ttype)),
+                CompositeLiteralInner::Enum(literal),
+                // CompositeType::Enum(literal_type),
+            ) => {
+                let tag_ttype_id = ttype.tags().get(&literal.tag).ok_or_else(|| TypeError::UnknownTag(literal.tag.clone()))?;
+
+                let inner_type = literal.inner_type(pager, registry, relations, scopes)?;
+                inner_type.must_eq(tag_ttype_id)?;
+                
+                Ok(self.ttype_id.clone())
+            },
+            (
+                TType::Composite(CompositeType::Array(_)),
+                CompositeLiteralInner::Array(literal),
+                // CompositeType::Array(literal_type),
+            ) => {
+                let inner_type = literal.inner_type(pager, registry, relations, scopes)?;
+                let array_type = TTypeId::Composite(CompositeTTypeId::Anonymous(
+                    Box::new(CompositeType::Array(ArrayType::new(
+                        inner_type,
+                        Some(literal.entries.len() as u64),
+                    )))
+                ));
+
+                self.ttype_id.must_eq(&array_type)?;
+
+                Ok(self.ttype_id.clone())
+            },
+            (
+                ttype,
+                inner,
+                // literal_type,
+            ) => {
+                Err(TypeError::TypeSetInvalid {
+                    expected: match inner {
+                        CompositeLiteralInner::Struct(_) => TypeSet::Struct,
+                        CompositeLiteralInner::Enum(_) => TypeSet::Enum,
+                        CompositeLiteralInner::Array(_) => TypeSet::Array,
+                    },
+                    got: ttype,
+                })
+            }
         }
     }
 
-    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        match self {
-            CompositeLiteral::Struct(literal) => literal.eval(pager, registry, relations, scopes),
-            CompositeLiteral::Enum(literal) => literal.eval(pager, registry, relations, scopes),
-        }
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<CompositeValue, EvalError> {
+        let inner = match &self.inner {
+            CompositeLiteralInner::Struct(literal) => CompositeValueInner::Struct(literal.eval(pager, registry, relations, scopes)?),
+            CompositeLiteralInner::Enum(literal) => CompositeValueInner::Enum(literal.eval(pager, registry, relations, scopes)?),
+            CompositeLiteralInner::Array(literal) => CompositeValueInner::Array(literal.eval(pager, registry, relations, scopes)?),
+        };
+        
+        Ok(CompositeValue {
+            ttype_id: self.ttype_id.clone(),
+            inner,
+        })
     }
 }
 
 impl Debug for CompositeLiteral {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Struct(value) => value.fmt(f),
-            Self::Enum(value) => value.fmt(f),
-        }
-    }
-}
-
-impl From<StructLiteral> for CompositeLiteral {
-    fn from(value: StructLiteral) -> Self {
-        CompositeLiteral::Struct(value)
-    }
-}
-
-impl From<EnumLiteral> for CompositeLiteral {
-    fn from(value: EnumLiteral) -> Self {
-        CompositeLiteral::Enum(value)
+        write!(f, "{:?}", self.ttype_id)?;
+        Debug::fmt(&self.inner, f)
     }
 }
 
@@ -139,8 +173,92 @@ impl TryFrom<Literal> for CompositeLiteral {
 
 #[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CompositeLiteralInner {
+    #[brw(magic = 0u8)]
+    Struct(StructLiteral),
+    #[brw(magic = 1u8)]
+    Enum(EnumLiteral),
+    #[brw(magic = 2u8)]
+    Array(ArrayLiteral),
+}
+
+impl CompositeLiteralInner {
+    // pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<CompositeType, TypeError> {
+    //     match self {
+    //         CompositeLiteralInner::Struct(literal) => Ok(
+    //             CompositeType::Struct(
+    //                 literal.eval_types(pager, registry, relations, scopes)?
+    //             )
+    //         ),
+    //         CompositeLiteralInner::Enum(literal) => Ok(
+    //             CompositeType::Enum(
+    //                 EnumType::new(indexmap! {
+    //                     literal.tag.clone() => literal.inner_type(pager, registry, relations, scopes)?,
+    //                 })
+    //             )
+    //         ),
+    //         CompositeLiteralInner::Array(literal) => Ok(
+    //             CompositeType::Array(
+    //                 ArrayType::new(
+    //                     literal.inner_type(pager, registry, relations, scopes)?,
+    //                     Some(literal.entries.len() as u64),
+    //                 )
+    //             )
+    //         ),
+    //     }
+    // }
+
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<CompositeValueInner, EvalError> {
+        match self {
+            CompositeLiteralInner::Struct(literal) => Ok(CompositeValueInner::Struct(literal.eval(pager, registry, relations, scopes)?)),
+            CompositeLiteralInner::Enum(literal) => Ok(CompositeValueInner::Enum(literal.eval(pager, registry, relations, scopes)?)),
+            CompositeLiteralInner::Array(literal) => Ok(CompositeValueInner::Array(literal.eval(pager, registry, relations, scopes)?)),
+        }
+    }
+}
+
+impl Debug for CompositeLiteralInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Struct(value) => value.fmt(f),
+            Self::Enum(value) => value.fmt(f),
+            Self::Array(value) => value.fmt(f),
+        }
+    }
+}
+
+impl From<StructLiteral> for CompositeLiteralInner {
+    fn from(value: StructLiteral) -> Self {
+        CompositeLiteralInner::Struct(value)
+    }
+}
+
+impl From<EnumLiteral> for CompositeLiteralInner {
+    fn from(value: EnumLiteral) -> Self {
+        CompositeLiteralInner::Enum(value)
+    }
+}
+
+impl From<ArrayLiteral> for CompositeLiteralInner {
+    fn from(value: ArrayLiteral) -> Self {
+        CompositeLiteralInner::Array(value)
+    }
+}
+
+impl TryFrom<Literal> for CompositeLiteralInner {
+    type Error = (); // todo better errors for literal conversions
+    
+    fn try_from(value: Literal) -> Result<Self, Self::Error> {
+        match value {
+            Literal::Composite(value) => Ok(value.inner),
+            _ => Err(()),
+        }
+    }
+}
+
+#[binrw]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StructLiteral {
-    pub ttype_id: TTypeId,
     #[bw(calc = self.fields.len() as u64)]
     len: u64,
     #[br(count = len, map = |fields: Vec<(Ident, Expression)>| BTreeMap::from_iter(fields.into_iter()))]
@@ -149,218 +267,115 @@ pub struct StructLiteral {
 }
 
 impl StructLiteral {
-    pub fn new(ttype_id: TTypeId, fields: BTreeMap<Ident, Expression>) -> StructLiteral {
+    pub fn new(fields: BTreeMap<Ident, Expression>) -> StructLiteral {
         StructLiteral {
-            ttype_id,
             fields,
         }
     }
 
-    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
-        let ttype = registry.ttype(&self.ttype_id)
-            .ok_or_else(|| TypeError::TypeNotFound(self.ttype_id.clone()))?;
-
-        let ttype: StructType = ttype.try_into()?;
-
-        let mut new_fields = btreemap! {};
-
-        // check all fields exist in type
-        for (field_name, field_value) in &self.fields {
-            // field exists
-            if let Some(field_ttype_id) = ttype.fields().get(field_name) {
-                let field_value_ttype = field_value.eval_types(pager.clone(), registry, relations, scopes)?;
-                if *field_ttype_id != field_value_ttype {
-                    return Err(TypeError::TypeIdInvalid {
-                        expected: field_ttype_id.clone(),
-                        got: field_value_ttype,
-                    });
-                }
-
-                new_fields.insert(field_name.clone(), field_value);
-            } else {
-                return Err(TypeError::UnknownField(field_name.clone()));
-            }
-        }
-
-        // check literal has all fields
-        for name in self.fields.keys() {
-            if !self.fields.contains_key(name) {
-                return Err(TypeError::MissingField(name.clone()));
-            }
-        }
-        
-        Ok(self.ttype_id.clone())
-    }
-
-    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<StructType, TypeError> {
         let mut fields = indexmap! {};
 
-        let ttype: StructType = registry
-            .ttype(&self.ttype_id).expect("type not found")
-            .try_into().expect("not a struct");
-
-        for key in ttype.fields().keys() {
-            fields.insert(key.clone(), self.fields[key].eval(pager.clone(), registry, relations, scopes)?);
+        for (name, expr) in &self.fields {
+            let field_type = expr.eval_types(pager.clone(), registry, relations, scopes)?;
+            fields.insert(name.clone(), field_type);
         }
-
-        // SAFETY: above lines would have crashed otherwise
-        let struct_value = unsafe { StructValue::new_unchecked(self.ttype_id.clone(), fields) };
         
-        Ok(struct_value.into())
+        Ok(StructType::new(fields))
     }
-}
 
-pub fn debug_db_struct<'a, D: Debug + 'static>(f: &mut std::fmt::Formatter<'_>, ttype_id: &TTypeId, fields: impl Iterator<Item = (&'a Ident, &'a D)>) -> fmt::Result {
-    let mut d = f.debug_struct(&format!("{:?}", ttype_id));
-    
-    for (name, value) in fields {
-        d.field(name, value);
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<StructValue, EvalError> {
+        let mut fields = indexmap! {};
+        
+        for (field, expr) in &self.fields {
+            let field_value = expr.eval(pager.clone(), registry, relations, scopes)?;
+            fields.insert(field.clone(), field_value);
+        }
+        
+        Ok(unsafe { StructValue::new_unchecked(fields) })
     }
-    
-    d.finish()
 }
 
 impl Debug for StructLiteral {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        debug_db_struct(f, &self.ttype_id, self.fields.iter())
-    }
-}
+        let mut map = f.debug_map();
 
-impl TryFrom<Literal> for StructLiteral {
-    type Error = (); // todo better errors for literal conversions
-    
-    fn try_from(value: Literal) -> Result<Self, Self::Error> {
-        match value {
-            Literal::Composite(CompositeLiteral::Struct(value)) => Ok(value),
-            _ => Err(()),
+        for (field, expr) in &self.fields {
+            map.entry(field, expr);
         }
-    }
-}
 
-impl TryFrom<CompositeLiteral> for StructLiteral {
-    type Error = (); // todo better errors for literal conversions
-    
-    fn try_from(value: CompositeLiteral) -> Result<Self, Self::Error> {
-        match value {
-            CompositeLiteral::Struct(value) => Ok(value),
-            _ => Err(()),
-        }
+        map.finish()
     }
 }
 
 #[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnumLiteral {
-    pub ttype_id: TTypeId,
     pub tag: Ident,
-    pub value: Box<Expression>,
+    pub expr: Box<Expression>,
 }
 
 impl EnumLiteral {
-    pub fn new(ttype_id: TTypeId, tag: Ident, value: Expression) -> EnumLiteral {
+    pub fn new(tag: Ident, expr: Expression) -> EnumLiteral {
         EnumLiteral {
-            ttype_id,
             tag,
-            value: Box::new(value),
+            expr: Box::new(expr),
         }
     }
 
-    pub fn new_option_some(ttype_id: TTypeId, some: Expression) -> EnumLiteral {
+    pub fn new_option_some(some: Expression) -> EnumLiteral {
         EnumLiteral {
-            ttype_id,
             tag: id!("Some"),
-            value: Box::new(some),
+            expr: Box::new(some),
         }
     }
 
-    pub fn new_option_none(ttype_id: TTypeId) -> EnumLiteral {
+    pub fn new_option_none() -> EnumLiteral {
         EnumLiteral {
-            ttype_id,
             tag: id!("None"),
-            value: Box::new(Expression::Literal(Literal::UNIT)),
+            expr: Box::new(Expression::Literal(Literal::UNIT)),
         }
     }
 
-    pub fn new_result_ok(ttype_id: TTypeId, ok: Expression) -> EnumLiteral {
+    pub fn new_result_ok(ok: Expression) -> EnumLiteral {
         EnumLiteral {
-            ttype_id,
             tag: id!("Ok"),
-            value: Box::new(ok),
+            expr: Box::new(ok),
         }
     }
 
-    pub fn new_result_err(ttype_id: TTypeId, err: Expression) -> EnumLiteral {
+    pub fn new_result_err(err: Expression) -> EnumLiteral {
         EnumLiteral {
-            ttype_id,
             tag: id!("Err"),
-            value: Box::new(err),
+            expr: Box::new(err),
         }
     }
 
-    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
-        let ttype = registry.ttype(&self.ttype_id)
-            .ok_or_else(|| TypeError::TypeNotFound(self.ttype_id.clone()))?;
-
-        let ttype: EnumType = ttype.try_into()?;
-
-        let tag_name = self.tag.clone();
-        
-        if let Some(tag_ttype_id) = ttype.tags().get(&tag_name) {
-            let value_ttype_id = self.value.eval_types(pager, registry, relations, scopes)?;
-            if *tag_ttype_id != value_ttype_id {
-                return Err(TypeError::TypeIdInvalid {
-                    expected: tag_ttype_id.clone(),
-                    got: value_ttype_id,
-                });
-            }
-
-            Ok(self.ttype_id.clone())
-        } else {
-            Err(TypeError::UnknownTag(tag_name))
-        }
+    pub fn inner_type(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+        let inner_type = self.expr.eval_types(pager, registry, relations, scopes)?;
+        Ok(inner_type)
     }
     
-    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
-        // SAFETY: this function should only be used after eval_types
-        let enum_value = unsafe { EnumValue::new_unchecked(
-            self.ttype_id.clone(),
-            self.tag.clone(),
-            self.value.eval(pager, registry, relations, scopes)?,
-        ) };
-        
-        Ok(enum_value.into())
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<EnumValue, EvalError> {
+        let inner_value = self.expr.eval(pager, registry, relations, scopes)?;
+        Ok(unsafe { EnumValue::new_unchecked(self.tag.clone(), inner_value) })
     }
-}
-
-pub fn debug_db_enum<'a, D: Debug + 'static>(f: &mut std::fmt::Formatter<'_>, ttype_id: &TTypeId, tag: &'a Ident, value: &'a D) -> fmt::Result {
-    f.debug_tuple(&format!("{ttype_id:?}#{tag:?}"))
-        .field(value)
-        .finish()
 }
 
 impl Debug for EnumLiteral {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        debug_db_enum(f, &self.ttype_id, &self.tag, &self.value)
+        write!(f, "#{:?}(", self.tag)?;
+        Debug::fmt(&self.expr, f)?;
+        write!(f, ")")
     }
 }
 
-impl TryFrom<Literal> for EnumLiteral {
+impl TryFrom<CompositeLiteralInner> for EnumLiteral {
     type Error = (); // todo better errors for literal conversions
     
-    fn try_from(value: Literal) -> Result<Self, Self::Error> {
+    fn try_from(value: CompositeLiteralInner) -> Result<Self, Self::Error> {
         match value {
-            Literal::Composite(CompositeLiteral::Enum(value)) => Ok(value),
-            _ => Err(()),
-        }
-    }
-}
-
-impl TryFrom<CompositeLiteral> for EnumLiteral {
-    type Error = (); // todo better errors for literal conversions
-    
-    fn try_from(value: CompositeLiteral) -> Result<Self, Self::Error> {
-        match value {
-            CompositeLiteral::Enum(value) => Ok(value),
+            CompositeLiteralInner::Enum(value) => Ok(value),
             _ => Err(()),
         }
     }
@@ -369,7 +384,6 @@ impl TryFrom<CompositeLiteral> for EnumLiteral {
 #[binrw]
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArrayLiteral {
-    array_ttype_id: TTypeId,
     #[bw(calc = entries.len() as u64)]
     len: u64,
     #[br(count = len)]
@@ -377,49 +391,28 @@ pub struct ArrayLiteral {
 }
 
 impl ArrayLiteral {
-    pub fn new(array_ttype_id: TTypeId, entries: Vec<Expression>) -> ArrayLiteral {
+    pub fn new(entries: Vec<Expression>) -> ArrayLiteral {
         ArrayLiteral {
-            array_ttype_id,
             entries,
         }
     }
 
-    pub fn eval_types(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
-        let ttype = registry.ttype(&self.array_ttype_id)
-            .ok_or_else(|| TypeError::TypeNotFound(self.array_ttype_id.clone()))?;
+    pub fn inner_type(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeTypes) -> Result<TTypeId, TypeError> {
+        if let Some(entry) = self.entries.first() {
+            let first_type = entry.eval_types(pager.clone(), registry, relations, scopes)?;
 
-        let TType::Array(ttype) = ttype else {
-            return Err(TypeError::TypeSetInvalid {
-                expected: TypeSet::Array,
-                got: ttype,
-            });
-        };
-
-        // check length
-        if let Some(length) = ttype.length() {
-            if self.entries.len() as u64 != *length {
-                return Err(TypeError::ArrayLen {
-                    expected: *length,
-                    got: self.entries.len() as u64,
-                });
+            for entry in &self.entries {
+                let entry_type = entry.eval_types(pager.clone(), registry, relations, scopes)?;
+                entry_type.must_eq(&first_type)?;
             }
-        }
 
-        // check all values are of correct type
-        for entry in &self.entries {
-            let entry_ttype_id = entry.eval_types(pager.clone(), registry, relations, scopes)?;
-            if entry_ttype_id != *ttype.inner_ttype_id() {
-                return Err(TypeError::TypeIdInvalid {
-                    expected: ttype.inner_ttype_id().clone(),
-                    got: entry_ttype_id,
-                });
-            }
+            Ok(first_type)
+        } else {
+            Ok(TTypeId::NEVER)
         }
-
-        Ok(self.array_ttype_id.clone())
     }
 
-    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<Value, EvalError> {
+    pub fn eval(&self, pager: Arc<Mutex<Pager>>, registry: &Registry, relations: &DbRelationSet, scopes: &ScopeValues) -> Result<ArrayValue, EvalError> {
         let mut entries = vec![];
 
         for entry in &self.entries {
@@ -427,37 +420,16 @@ impl ArrayLiteral {
         }
 
         // SAFETY: this function should only be used after eval_types
-        let array_value = unsafe { ArrayValue::new_unchecked(self.array_ttype_id.clone(), entries) };
+        let array_value = unsafe { ArrayValue::new_unchecked(entries) };
         
-        Ok(array_value.into())
+        Ok(array_value)
     }
-}
-
-pub fn debug_db_array<'a, D: Debug + 'static>(f: &mut std::fmt::Formatter<'_>, array_ttype_id: &TTypeId, entries: impl Iterator<Item = &'a D>) -> fmt::Result {
-    write!(f, "{:?} ", array_ttype_id)?;
-
-    let mut list = f.debug_list();
-    
-    for value in entries {
-        list.entry(value);
-    }
-    
-    list.finish()
 }
 
 impl Debug for ArrayLiteral {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        debug_db_array(f, &self.array_ttype_id, self.entries.iter())
-    }
-}
-
-impl TryFrom<Literal> for ArrayLiteral {
-    type Error = (); // todo better errors for literal conversions
-    
-    fn try_from(value: Literal) -> Result<Self, Self::Error> {
-        match value {
-            Literal::Array(value) => Ok(value),
-            _ => Err(()),
-        }
+        f.debug_list()
+            .entries(&self.entries)
+            .finish()
     }
 }

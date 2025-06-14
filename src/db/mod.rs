@@ -5,7 +5,7 @@ use pager::{DbHeader, FreeListPage, HeaderReadGuard, LinkedPageReadGuard, Linked
 use registry::Registry;
 use relation::memory::PagerRelation;
 
-use crate::{db::relation::Schema, error::NormaliseToIo, query::{schema_query::{RelationSchemaQuery, SchemaError, SchemaQuery, TypeSchemaQuery}, DataQuery, Query, QueryExecutionError}, typesystem::{scope::{ScopeTypes, ScopeValues}, value::{ScalarValue, Value}}};
+use crate::{db::{registry::module::Module, relation::Schema}, error::NormaliseToIo, query::{schema_query::{ModuleSchemaQuery, RelationSchemaQuery, SchemaError, SchemaQuery, TypeSchemaQuery}, DataQuery, Query, QueryExecutionError}, typesystem::{scope::{ScopeTypes, ScopeValues}, value::{ScalarValue, Value}}};
 
 pub mod registry;
 pub mod relation;
@@ -85,6 +85,20 @@ impl Db {
             },
             Query::Schema(schema_query) => {
                 match schema_query {
+                    SchemaQuery::Module(query) => {
+                        let mut manifest = self.manifest_mut();
+                        match query {
+                            ModuleSchemaQuery::Create { name } => {
+                                let (mod_name, path) = name.split_last();
+                                let Some(module) = manifest.registry_mut().module_mut(path) else {
+                                    return Err(SchemaError::InvalidPath(name.clone()).into());
+                                };
+
+                                let added = module.insert(mod_name.clone(), Module::new());
+                                Ok(Value::Scalar(ScalarValue::Bool(added)))
+                            },
+                        }
+                    },
                     SchemaQuery::Type(query) => {
                         let mut manifest = self.manifest_mut();
                         match query {
@@ -213,26 +227,26 @@ mod tests {
     use codb_core::{IdentForest, IdentTree};
     use itertools::Itertools;
 
-    use crate::{db::{registry::TTypeId, relation::{Relation, Schema}, Db}, expression::{Expression, InterpreterAction, Literal, StructLiteral}, query::{lexer::LexerInner, parser::Parser, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery, Query}, typesystem::{ttype::{CompositeType, EnumType, StructType}, value::{ArrayValue, EnumValue, ScalarValue, StructValue, Value}}};
+    use crate::{db::{registry::TTypeId, relation::{Relation, Schema}, Db}, expression::{CompositeLiteral, Expression, InterpreterAction, Literal, StructLiteral}, query::{lex::{lex, TokenSlice}, parser::{ExpressionArgs, Parse}, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery, Query}, typesystem::{ttype::{CompositeType, EnumType, StructType}, value::{ArrayValue, CompositeValue, EnumValue, ScalarValue, StructValue, Value}}};
 
     use super::{pager::Pager, relation::memory::PagerRelation};
 
     fn db_initial_values(ttype: &StructType) -> [StructValue; 3] {
         let mut rows = [
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), indexmap! {
+            unsafe { StructValue::new_unchecked(indexmap! {
                 id!("id") => Value::Scalar(ScalarValue::Int32(1).into()),
                 id!("name") => Value::Scalar(ScalarValue::String("Jim Jones".into()).into()),
                 id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
             }) }.into(),
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), indexmap! {
+            unsafe { StructValue::new_unchecked(indexmap! {
                 id!("id") => Value::Scalar(ScalarValue::Int32(2).into()),
                 id!("name") => Value::Scalar(ScalarValue::String("Jimboni Jonesi".into()).into()),
                 id!("active") => Value::Scalar(ScalarValue::Bool(true).into()),
             }) }.into(),
             // SAFETY: test case
-            unsafe { StructValue::new_unchecked(TTypeId::new_anonymous(ttype.clone().into()), indexmap! {
+            unsafe { StructValue::new_unchecked(indexmap! {
                 id!("id") => Value::Scalar(ScalarValue::Int32(-1).into()),
                 id!("name") => Value::Scalar(ScalarValue::String("El Jones, Jim".into()).into()),
                 id!("active") => Value::Scalar(ScalarValue::Bool(false).into()),
@@ -318,16 +332,21 @@ mod tests {
 
             assert_eq!(entries, db_initial_values(relation.schema().ttype()));
 
-            expected_deleted_row = entries.remove(0).into();
+            expected_deleted_row = CompositeValue {
+                ttype_id: relation.schema().ttype_id(),
+                inner: entries.remove(0).into(),
+            }.into();
 
             let pkey_type = TTypeId::new_anonymous(relation.schema().pkey_ttype(registry).unwrap().into());
             
-            pkey_value = StructLiteral::new(
-                pkey_type,
-                btreemap! {
-                    id!("id") => Expression::Literal(ScalarValue::Int32(-1).into()),
-                },
-            ).into();
+            pkey_value = CompositeLiteral {
+                ttype_id: pkey_type,
+                inner: StructLiteral::new(
+                    btreemap! {
+                        id!("id") => Expression::Literal(ScalarValue::Int32(-1).into()),
+                    },
+                ).into()
+            }.into();
 
             relation_type_option = EnumType::new_option(relation.schema().ttype_id());
         }
@@ -349,7 +368,7 @@ mod tests {
 
         let out: EnumValue = out.try_into().unwrap();
 
-        let expected_none = EnumValue::new_option_none(TTypeId::new_anonymous(relation_type_option.into()));
+        let expected_none = EnumValue::new_option_none();
 
         assert_eq!(expected_none, out);
     }
@@ -358,24 +377,23 @@ mod tests {
     fn data_query() {
         let db = create_db();
 
-        let lexer = LexerInner::new("
+        let tokens = lex("
             #Rel.range<id>(
                 /* 0-1 instead of just -1 since negation operator isn't finished */
                 struct { id: int32 } { id: - 0i32 10i32 },
                 struct { id: int32 } { id: 10i32 }
             )
-        ".chars());
-        let mut parser = Parser::new(lexer);
+        ".chars()).expect("failed to lex");
 
         let query = {
             let manifest = db.manifest();
 
             Query::Data(
-                DataQuery(parser.parse_expression(
-                    db.pager.clone(),
-                    &manifest.registry,
-                    &manifest.relations(db.pager.clone())
-                ).expect("failed to parse query").1)
+                DataQuery::parse(&mut TokenSlice::from(&*tokens), ExpressionArgs {
+                    pager: db.pager.clone(),
+                    registry: &manifest.registry,
+                    relations: &manifest.relations(db.pager.clone())
+                }).expect("failed to parse").0
             )
         };
 
@@ -385,7 +403,6 @@ mod tests {
         let mut entries: Vec<StructValue> = array.entries().iter().map(|entry| entry.clone().try_into().unwrap()).collect_vec();
 
         let expected_deleted_row: Value;
-        let relation_type_option;
         {
             let db_manifest = db.manifest();
             let relations = db_manifest.relations(db.pager.clone());
@@ -393,28 +410,28 @@ mod tests {
 
             assert_eq!(entries, db_initial_values(relation.schema().ttype()));
 
-            expected_deleted_row = entries.remove(0).into();
-
-            relation_type_option = EnumType::new_option(relation.schema().ttype_id());
+            expected_deleted_row = CompositeValue {
+                ttype_id: relation.schema().ttype_id(),
+                inner: entries.remove(0).into(),
+            }.into();
         }
 
-        let lexer = LexerInner::new("
+        let tokens = lex("
             #Rel.remove(
                 // 0-1 instead of just -1 since negation operator isn't finished
                 struct { id: int32 } { id: - 0i32 1i32 }
             )
-        ".chars());
-        let mut parser = Parser::new(lexer);
+        ".chars()).expect("failed to lex");
 
         let query = {
             let manifest = db.manifest();
 
             Query::Data(
-                DataQuery(parser.parse_data_query(
-                    db.pager.clone(),
-                    &manifest.registry,
-                    &manifest.relations(db.pager.clone())
-                ).expect("failed to vote"))
+                DataQuery::parse(&mut TokenSlice::from(&*tokens), ExpressionArgs {
+                    pager: db.pager.clone(),
+                    registry: &manifest.registry,
+                    relations: &manifest.relations(db.pager.clone())
+                }).expect("failed to parse").0
             )
         };
 
@@ -429,7 +446,7 @@ mod tests {
 
         let out: EnumValue = out.try_into().unwrap();
 
-        let expected_none = EnumValue::new_option_none(TTypeId::new_anonymous(relation_type_option.into()));
+        let expected_none = EnumValue::new_option_none();
 
         assert_eq!(expected_none, out);
     }
