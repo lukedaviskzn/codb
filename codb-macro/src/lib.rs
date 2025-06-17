@@ -6,7 +6,7 @@ use syn::LitStr;
 pub fn id(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse::<LitStr>(input).expect("parameter not a string literal");
     let value = input.value();
-    let _ = codb_core::Ident::from_str(&value).expect("parameter is not a valid nested identifier");
+    let _ = codb_core::Ident::from_str(&value).expect("parameter is not a valid identifier");
     
     quote::quote! {
         {
@@ -34,7 +34,7 @@ pub fn nested_id(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 pub fn id_path(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse::<LitStr>(input).expect("parameter not a string literal");
     let value = input.value();
-    let _ = codb_core::IdentPath::from_str(&value).expect("parameter is not a valid nested identifier");
+    let _ = codb_core::IdentPath::from_str(&value).expect("parameter is not a valid path");
     
     quote::quote! {
         {

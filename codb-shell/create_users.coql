@@ -1,7 +1,8 @@
 .schema type UserStatus = enum {
-    Active: unit,
-    Inactive: unit,
-    Other: string,
+    // `Active` and `Active(unit)` are equivalent
+    Active,
+    Inactive(unit),
+    Other(string),
 }
 
 

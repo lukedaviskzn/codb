@@ -136,6 +136,7 @@ pub enum Keyword {
     Match,
     Struct,
     Enum,
+    Module,
     Type,
     Relation,
 }
@@ -148,6 +149,7 @@ impl Display for Keyword {
             Keyword::Match => write!(f, "match"),
             Keyword::Struct => write!(f, "struct"),
             Keyword::Enum => write!(f, "enum"),
+            Keyword::Module => write!(f, "module"),
             Keyword::Type => write!(f, "type"),
             Keyword::Relation => write!(f, "relation"),
         }
@@ -429,33 +431,24 @@ pub(crate) fn lex(chars: &str) -> Result<Box<[Token]>, LexError> {
                 end = index + char.len_utf8();
             }
 
-            let kind;
-
-            if ident == "if" {
-                kind = TokenKind::Keyword(Keyword::If);
-            } else if ident == "else" {
-                kind = TokenKind::Keyword(Keyword::Else);
-            } else if ident == "match" {
-                kind = TokenKind::Keyword(Keyword::Match);
-            } else if ident == "struct" {
-                kind = TokenKind::Keyword(Keyword::Struct);
-            } else if ident == "enum" {
-                kind = TokenKind::Keyword(Keyword::Enum);
-            } else if ident == "type" {
-                kind = TokenKind::Keyword(Keyword::Type);
-            } else if ident == "relation" {
-                kind = TokenKind::Keyword(Keyword::Relation);
-            } else if ident == "unit" {
-                kind = TokenKind::ScalarLiteral(ScalarValue::Unit);
-            } else if ident == "true" {
-                kind = TokenKind::ScalarLiteral(ScalarValue::Bool(true));
-            } else if ident == "false" {
-                kind = TokenKind::ScalarLiteral(ScalarValue::Bool(false));
-            } else if let Some(scalar) = ScalarType::from_name(&ident) {
-                kind = TokenKind::ScalarType(scalar);
-            } else {
-                kind = TokenKind::Ident(Ident::try_from(ident).expect("unreachable"));
-            }
+            let kind = match ident.as_str() {
+                "if" => TokenKind::Keyword(Keyword::If),
+                "else" => TokenKind::Keyword(Keyword::Else),
+                "match" => TokenKind::Keyword(Keyword::Match),
+                "struct" => TokenKind::Keyword(Keyword::Struct),
+                "enum" => TokenKind::Keyword(Keyword::Enum),
+                "module" => TokenKind::Keyword(Keyword::Module),
+                "type" => TokenKind::Keyword(Keyword::Type),
+                "relation" => TokenKind::Keyword(Keyword::Relation),
+                "unit" => TokenKind::ScalarLiteral(ScalarValue::Unit),
+                "true" => TokenKind::ScalarLiteral(ScalarValue::Bool(true)),
+                "false" => TokenKind::ScalarLiteral(ScalarValue::Bool(false)),
+                ident_str => if let Some(kind) = ScalarType::from_name(ident_str) {
+                    TokenKind::ScalarType(kind)
+                } else {
+                    TokenKind::Ident(Ident::try_from(ident).expect("invalid ident"))
+                },
+            };
 
             token = Some(Token {
                 span: Span::new(index, end),

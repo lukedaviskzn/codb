@@ -140,32 +140,57 @@ impl Registry {
             root: Module::new(),
         };
 
-        registry.root
-            .insert(id!("Result"), EnumType::new(indexmap! {
-                id!("Ok") => TTypeId::UNIT,
-                id!("Err") => TTypeId::STRING,
-            }));
+        let mut std = Module::new();
 
-        registry.root
-            .insert(id!("unwrap"), Function::new(
-                pager,
-                &registry,
-                relations,
-                indexmap! {
-                    id!("result") => id_path!("Result").into(),
+        std.insert(id!("Result"), EnumType::new(indexmap! {
+            id!("Ok") => TTypeId::UNIT,
+            id!("Err") => TTypeId::STRING,
+        }));
+
+        registry.root.insert(id!("std"), std);
+
+        let panic = Function::new(
+            pager.clone(),
+            &registry,
+            relations,
+            indexmap! {
+                id!("error") => TTypeId::STRING,
+            },
+            TTypeId::NEVER,
+            Expression::Action(
+                InterpreterAction::Panic {
+                    message: Box::new(Expression::NestedIdent(id!("error").into())),
                 },
-                TTypeId::UNIT,
-                Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
-                    param: Expression::NestedIdent(id!("result").into()),
-                    ret_type: TTypeId::UNIT,
-                    branches: btreemap! {
-                        id!("Ok") => Branch::new(id!("_"), Expression::Literal(Literal::UNIT)),
-                        id!("Err") => Branch::new(id!("error"), Expression::Action(
-                            InterpreterAction::Panic { message: Box::new(Expression::NestedIdent(id!("error").into())) }
-                        )),
-                    },
-                }))),
-            ).expect("failed to type check `unwrap`"));
+            ),
+        ).expect("failed to type check `unwrap`");
+
+        let std = registry.root.module_mut(&id!("std")).expect("std module does note exist");
+        
+        std.insert(id!("panic"), panic);
+
+        let unwrap = Function::new(
+            pager,
+            &registry,
+            relations,
+            indexmap! {
+                id!("result") => id_path!("std::Result").into(),
+            },
+            TTypeId::UNIT,
+            Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
+                param: Expression::NestedIdent(id!("result").into()),
+                ret_type: TTypeId::UNIT,
+                branches: btreemap! {
+                    id!("Ok") => Branch::new(id!("_"), Expression::Literal(Literal::UNIT)),
+                    id!("Err") => Branch::new(id!("error"), Expression::Action(
+                        InterpreterAction::Panic { message: Box::new(Expression::NestedIdent(id!("error").into())) }
+                    )),
+                },
+            }))),
+        ).expect("failed to type check `unwrap`");
+        
+        let std = registry.root.module_mut(&id!("std")).expect("std module does note exist");
+        
+        std.insert(id!("unwrap"), unwrap);
 
         registry
     }

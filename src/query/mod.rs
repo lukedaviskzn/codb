@@ -8,8 +8,8 @@ pub mod schema_query;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Span {
-    start: usize,
-    end: Option<usize>,
+    pub start: usize,
+    pub end: Option<usize>,
 }
 
 impl Span {

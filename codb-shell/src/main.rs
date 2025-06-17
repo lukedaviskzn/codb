@@ -88,14 +88,13 @@ fn print_connection_error(err: &ConnectionExecutionError, query: &str) {
 fn print_error_report(span: Span, message: String, query: &str) {
     let context_start = span.start.checked_sub(100).unwrap_or_default();
     let context_end = (
-        context_start + 100 +
-        span.length.unwrap_or_default()
+        span.end.unwrap_or(span.start) + 100
     ).min(query.len());
     
     let context_span = context_start..context_end;
     
-    let span = if let Some(len) = span.length {
-        span.start..(span.start + len)
+    let span = if let Some(end) = span.end {
+        span.start..(end)
     } else {
         span.start..query.chars().count()
     };

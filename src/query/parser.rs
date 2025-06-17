@@ -3,7 +3,7 @@ use std::{borrow::Borrow, collections::BTreeMap, fmt::{Debug, Display}, hash::Ha
 use codb_core::{Ident, IdentForest, IdentPath, IdentTree, NestedIdent};
 use indexmap::IndexMap;
 
-use crate::{db::{pager::Pager, registry::{CompositeTTypeId, Registry, TTypeId}, DbRelationSet}, expression::{ArithmeticOp, ArrayLiteral, Branch, CompositeLiteral, CompositeLiteralInner, ControlFlow, EnumLiteral, Expression, IfControlFlow, InterpreterAction, Literal, LogicalOp, MatchControlFlow, Op, StructLiteral}, query::{lex::{TokenKind, TokenSlice}, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery}, typesystem::{function::Function, ttype::{ArrayType, CompositeType, EnumType, ScalarType, StructType}, value::ScalarValue, TypeError}};
+use crate::{db::{pager::Pager, registry::{CompositeTTypeId, Registry, TTypeId}, DbRelationSet}, expression::{ArithmeticOp, ArrayLiteral, Branch, CompositeLiteral, CompositeLiteralInner, ControlFlow, EnumLiteral, Expression, FunctionInvocation, IfControlFlow, InterpreterAction, Literal, LogicalOp, MatchControlFlow, Op, StructLiteral}, query::{lex::{TokenKind, TokenSlice}, schema_query::{ModuleSchemaQuery, RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery}, typesystem::{function::Function, ttype::{ArrayType, CompositeType, EnumType, ScalarType, StructType}, value::ScalarValue, TypeError}};
 
 use super::{lex::{Keyword, LexErrorKind, Symbol, Token, TokenTag}, Span};
 
@@ -27,6 +27,7 @@ pub enum ParseContext {
     ParsingDataQuery,
     ParsingSchemaQuery,
     ParsingExpression,
+    ParsingOperation,
     ParsingIf,
     ParsingMatch,
     ParsingBranch,
@@ -58,6 +59,7 @@ impl Display for ParseContext {
             ParseContext::ParsingDataQuery => write!(f, "parsing data query"),
             ParseContext::ParsingSchemaQuery => write!(f, "parsing schema query"),
             ParseContext::ParsingExpression => write!(f, "parsing expression"),
+            ParseContext::ParsingOperation => write!(f, "parsing operation"),
             ParseContext::ParsingIf => write!(f, "parsing if control flow"),
             ParseContext::ParsingMatch => write!(f, "parsing match control flow"),
             ParseContext::ParsingBranch => write!(f, "parsing branch"),
@@ -174,6 +176,12 @@ impl Parse for SchemaQuery {
         let TokenKind::Keyword(keyword) = keyword_token.kind else { unreachable!() };
         
         match keyword {
+            Keyword::Module => {
+                let (name, name_span) = IdentPath::parse(tokens, ()).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
+                Ok((SchemaQuery::Module(ModuleSchemaQuery::Create {
+                    name,
+                }), keyword_token.span.merge(name_span)))
+            },
             Keyword::Type => {
                 let (name, _) = IdentPath::parse(tokens, ()).map_err(|err| err.with_context(ParseContext::ParsingSchemaQuery))?;
                 tokens.expect_symbol(Symbol::Equal)?;
@@ -222,62 +230,52 @@ impl Parse for Ident {
     }
 }
 
-// pub(crate) struct Wrapped<P: Parse>(pub P);
+pub(crate) struct WrappedArgs<'a, P: Parse> {
+    args: P::Args<'a>,
+    open: Symbol,
+    close: Symbol,
+}
 
-// pub(crate) struct WrapArgs<'a, P: Parse> {
-//     pub args: P::Args<'a>,
-//     pub open: Symbol,
-//     pub close: Symbol,
-// }
-
-// impl<P: Parse> Parse for Wrapped<P> {
-//     type Args<'a> = WrapArgs<'a, P>;
-
-//     fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
-//         let start_token = tokens.expect_symbol(args.open)?;
-//         let (value, _) = P::parse(tokens, args.args)?;
-//         let end_token = tokens.expect_symbol(args.close)?;
-
-//         Ok((Wrapped(value), start_token.span.merge(end_token.span)))
-//     }
-// }
-
-impl Parse for IdentPath {
-    type Args<'a> = ();
-
-    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
-        let (idents, list_span) = NonEmpty::parse(tokens, ListArgs {
-            args: (),
-            separator: Symbol::PathSep,
-            allow_trailing: false,
-        })
-            .map_err(|err| err.with_context(ParseContext::ParsingIdentPath))?;
-        
-        let mut ident_list = vec![idents.head];
-        ident_list.extend(idents.tail);
-
-        let ident_path = IdentPath::try_from(ident_list).expect("invalid ident path");
-
-        Ok((ident_path, list_span))
+impl<'a, P: Parse> Clone for WrappedArgs<'a, P> where P::Args<'a>: Clone {
+    fn clone(&self) -> Self {
+        Self {
+            args: self.args.clone(),
+            open: self.open,
+            close: self.close,
+        }
     }
 }
 
-impl Parse for NestedIdent {
-    type Args<'a> = ();
+pub(crate) struct Wrapped<P: Parse>(P);
 
-    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
-        let (ident_list, list_span) = NonEmpty::parse(tokens, ListArgs {
-            args: (),
-            separator: Symbol::Dot,
-            allow_trailing: false,
-        }).map_err(|err| err.with_context(ParseContext::ParsingNestedIdent))?;
+impl<P: Parse> Wrapped<P> {
+    pub fn unwrap(self) -> P {
+        self.0
+    }
+}
 
-        let mut idents = vec![ident_list.head];
-        idents.extend(ident_list.tail);
-        
-        let nested_ident = NestedIdent::try_from(idents).expect("invalid nested ident");
+impl<P: Parse> Parse for Wrapped<P> {
+    type Args<'a> = WrappedArgs<'a, P>;
 
-        Ok((nested_ident, list_span))
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        tokens.expect_symbol(args.open)?;
+        let (item, span) = P::parse(tokens, args.args)?;
+        tokens.expect_symbol(args.close)?;
+        Ok((Wrapped(item), span))
+    }
+}
+
+impl<P: Parse> Parse for Option<P> where for<'a> P::Args<'a>: Clone {
+    type Args<'a> = P::Args<'a>;
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        match P::parse(&mut tokens.clone(), args.clone()) {
+            Ok(_) => {
+                let (item, span) = P::parse(tokens, args)?;
+                Ok((Some(item), span))
+            },
+            Err(err) => Ok((None, Span::new(err.span.start, err.span.start))),
+        }
     }
 }
 
@@ -348,79 +346,6 @@ impl<P: Parse> Parse for NonEmpty<P> where for<'a> P::Args<'a>: Clone {
                 tail: vec![],
             }, head_span))
         }
-    }
-}
-
-impl Parse for CompositeType {
-    type Args<'a> = ();
-
-    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
-        let token = tokens.expect_peek().map_err(|err| err.with_context(ParseContext::ParsingCompositeTTypeId))?;
-        match &token.kind {
-            TokenKind::Keyword(Keyword::Struct) => {
-                let (struct_type, struct_type_span) = StructType::parse(tokens, ())?;
-                Ok((CompositeType::Struct(struct_type), struct_type_span))
-            },
-            TokenKind::Keyword(Keyword::Enum) => {
-                let (enum_type, enum_type_span) = EnumType::parse(tokens, ())?;
-                Ok((CompositeType::Enum(enum_type), enum_type_span))
-            },
-            kind => return Err(ParseError {
-                span: token.span,
-                context: Some(ParseContext::ParsingCompositeTTypeId),
-                kind: ParseErrorKind::ExpectedTokenKindOneOf {
-                    expected: [
-                        TokenKind::Keyword(Keyword::Struct),
-                        TokenKind::Keyword(Keyword::Enum),
-                    ].into(),
-                    got: kind.clone(),
-                },
-            })
-        }
-    }
-}
-
-impl Parse for StructType {
-    type Args<'a> = ();
-
-    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
-        let struct_token = tokens.expect_keyword(Keyword::Struct).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
-        tokens.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
-
-        let (fields, fields_span) = IndexMap::parse(tokens, MapArgs {
-            key_args: (),
-            value_args: (),
-            map_separator: Some(Symbol::Colon),
-            entry_separator: Some(Symbol::Comma),
-        })?;
-        
-        let bracket_token = tokens.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
-
-        let span = struct_token.span.merge(fields_span).merge(bracket_token.span);
-
-        Ok((StructType::new(fields), span))
-    }
-}
-
-impl Parse for EnumType {
-    type Args<'a> = ();
-
-    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
-        let enum_token = tokens.expect_keyword(Keyword::Enum).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
-        tokens.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
-
-        let (tags, tags_span) = IndexMap::parse(tokens, MapArgs {
-            key_args: (),
-            value_args: (),
-            map_separator: Some(Symbol::Colon),
-            entry_separator: Some(Symbol::Comma),
-        })?;
-
-        let bracket_token = tokens.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
-
-        let span = enum_token.span.merge(tags_span).merge(bracket_token.span);
-
-        Ok((EnumType::new(tags), span))
     }
 }
 
@@ -535,6 +460,129 @@ where for<'a> K::Args<'a>: Clone, for<'a> V::Args<'a>: Clone {
     }
 }
 
+impl Parse for IdentPath {
+    type Args<'a> = ();
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (idents, list_span) = NonEmpty::parse(tokens, ListArgs {
+            args: (),
+            separator: Symbol::PathSep,
+            allow_trailing: false,
+        })
+            .map_err(|err| err.with_context(ParseContext::ParsingIdentPath))?;
+        
+        let mut ident_list = vec![idents.head];
+        ident_list.extend(idents.tail);
+
+        let ident_path = IdentPath::try_from(ident_list).expect("invalid ident path");
+
+        Ok((ident_path, list_span))
+    }
+}
+
+impl Parse for NestedIdent {
+    type Args<'a> = ();
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (ident_list, list_span) = NonEmpty::parse(tokens, ListArgs {
+            args: (),
+            separator: Symbol::Dot,
+            allow_trailing: false,
+        }).map_err(|err| err.with_context(ParseContext::ParsingNestedIdent))?;
+
+        let mut idents = vec![ident_list.head];
+        idents.extend(ident_list.tail);
+        
+        let nested_ident = NestedIdent::try_from(idents).expect("invalid nested ident");
+
+        Ok((nested_ident, list_span))
+    }
+}
+
+impl Parse for CompositeType {
+    type Args<'a> = ();
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let token = tokens.expect_peek().map_err(|err| err.with_context(ParseContext::ParsingCompositeTTypeId))?;
+        match &token.kind {
+            TokenKind::Keyword(Keyword::Struct) => {
+                let (struct_type, struct_type_span) = StructType::parse(tokens, ())?;
+                Ok((CompositeType::Struct(struct_type), struct_type_span))
+            },
+            TokenKind::Keyword(Keyword::Enum) => {
+                let (enum_type, enum_type_span) = EnumType::parse(tokens, ())?;
+                Ok((CompositeType::Enum(enum_type), enum_type_span))
+            },
+            kind => return Err(ParseError {
+                span: token.span,
+                context: Some(ParseContext::ParsingCompositeTTypeId),
+                kind: ParseErrorKind::ExpectedTokenKindOneOf {
+                    expected: [
+                        TokenKind::Keyword(Keyword::Struct),
+                        TokenKind::Keyword(Keyword::Enum),
+                    ].into(),
+                    got: kind.clone(),
+                },
+            })
+        }
+    }
+}
+
+impl Parse for StructType {
+    type Args<'a> = ();
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let struct_token = tokens.expect_keyword(Keyword::Struct).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
+        tokens.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
+
+        let (fields, fields_span) = IndexMap::parse(tokens, MapArgs {
+            key_args: (),
+            value_args: (),
+            map_separator: Some(Symbol::Colon),
+            entry_separator: Some(Symbol::Comma),
+        })?;
+        
+        let bracket_token = tokens.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingStructType))?;
+
+        let span = struct_token.span.merge(fields_span).merge(bracket_token.span);
+
+        Ok((StructType::new(fields), span))
+    }
+}
+
+impl Parse for EnumType {
+    type Args<'a> = ();
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, _args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let enum_token = tokens.expect_keyword(Keyword::Enum).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
+        tokens.expect_symbol(Symbol::CurlyBracketOpen).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
+
+        let (wrapped_tags, tags_span) = IndexMap::<Ident, Option<Wrapped<TTypeId>>>::parse(tokens, MapArgs {
+            key_args: (),
+            value_args: WrappedArgs {
+                args: (),
+                open: Symbol::BracketOpen,
+                close: Symbol::BracketClose,
+            },
+            map_separator: None,
+            entry_separator: Some(Symbol::Comma),
+        })?;
+
+        let tags = IndexMap::from_iter(wrapped_tags.into_iter().map(|(tag, ttype_id)|
+            (tag, match ttype_id {
+                Some(Wrapped(ttype_id)) => ttype_id,
+                None => TTypeId::UNIT,
+            })
+        ));
+
+        let bracket_token = tokens.expect_symbol(Symbol::CurlyBracketClose).map_err(|err| err.with_context(ParseContext::ParsingEnumType))?;
+
+        let span = enum_token.span.merge(tags_span).merge(bracket_token.span);
+
+        Ok((EnumType::new(tags), span))
+    }
+}
+
 impl Parse for TTypeId {
     type Args<'a> = ();
 
@@ -635,159 +683,24 @@ impl Parse for Expression {
     type Args<'a> = ExpressionArgs<'a>;
 
     fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
-        let token = tokens.expect_peek()?;
+        let token = tokens.expect_peek()?.clone();
 
-        let spanned_expression = match token.kind.clone() {
-            // op (arithmetic)
-            TokenKind::Symbol(Symbol::Plus) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Arithmetic(ArithmeticOp::Add(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            TokenKind::Symbol(Symbol::Minus) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Arithmetic(ArithmeticOp::Sub(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            TokenKind::Symbol(Symbol::Asterisk) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Arithmetic(ArithmeticOp::Mul(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            TokenKind::Symbol(Symbol::ForwardSlash) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Arithmetic(ArithmeticOp::Div(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            // op (logical)
-            TokenKind::Symbol(Symbol::And) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Logical(LogicalOp::And(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            TokenKind::Symbol(Symbol::Or) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Logical(LogicalOp::Or(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            TokenKind::Symbol(Symbol::Not) => {
-                let token = tokens.expect_token()?;
-                let (expr, expr_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(expr_span);
-                
-                (Expression::Op(Box::new(Op::Logical(LogicalOp::Not(expr)))), span)
-            },
-            TokenKind::Symbol(Symbol::DoubleEqual) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Logical(LogicalOp::Eq(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            TokenKind::Symbol(Symbol::LessThan) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Logical(LogicalOp::Lt(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            TokenKind::Symbol(Symbol::GreaterThan) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Logical(LogicalOp::Gt(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            TokenKind::Symbol(Symbol::LessThanOrEqual) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Logical(LogicalOp::Lte(
-                    left_expr,
-                    right_expr,
-                )))), span)
-            },
-            TokenKind::Symbol(Symbol::GreaterThanOrEqual) => {
-                let token = tokens.expect_token()?;
-                let (left_expr, left_span) = Expression::parse(tokens, args.clone())?;
-                let (right_expr, right_span) = Expression::parse(tokens, args.clone())?;
-
-                let span = token.span.merge(left_span).merge(right_span);
-                
-                (Expression::Op(Box::new(Op::Logical(LogicalOp::Gte(
-                    left_expr,
-                    right_expr,
-                )))), span)
+        let spanned_expression = match token.kind {
+            TokenKind::Symbol(Symbol::Plus) | TokenKind::Symbol(Symbol::Minus) |
+            TokenKind::Symbol(Symbol::Asterisk) | TokenKind::Symbol(Symbol::ForwardSlash) |
+            TokenKind::Symbol(Symbol::And) | TokenKind::Symbol(Symbol::Or) |
+            TokenKind::Symbol(Symbol::Not) | TokenKind::Symbol(Symbol::DoubleEqual) |
+            TokenKind::Symbol(Symbol::LessThan) | TokenKind::Symbol(Symbol::GreaterThan) |
+            TokenKind::Symbol(Symbol::LessThanOrEqual) | TokenKind::Symbol(Symbol::GreaterThanOrEqual) => {
+                let (op, span) = Op::parse(tokens, args)?;
+                (Expression::Op(Box::new(op)), span)
             },
             TokenKind::Keyword(Keyword::If) => {
                 let (cf, span) = IfControlFlow::parse(tokens, args)?;
-
                 (Expression::ControlFlow(Box::new(ControlFlow::If(cf))), span)
             },
             TokenKind::Keyword(Keyword::Match) => {
                 let (cf, span) = MatchControlFlow::parse(tokens, args)?;
-
                 (Expression::ControlFlow(Box::new(ControlFlow::Match(cf))), span)
             },
             TokenKind::Symbol(Symbol::Hash) => {
@@ -887,77 +800,201 @@ impl Parse for Expression {
 
                 (Expression::Action(action), span)
             }
-            // // function invocation or nested ident
-            // TokenKind::Ident(ident) => {
-            //     let token = tokens.expect_token()?;
-            //     let mut idents = vec![ident];
+            // literal, function invocation, or nested ident
+            kind => {
+                if let Ok(_) = Literal::parse(&mut tokens.clone(), args.clone()) {
+                    let (literal, span) = Literal::parse(tokens, args.clone()).map_err(|err| err.with_context(ParseContext::ParsingExpression))?;
+                    return Ok((Expression::Literal(literal), span));
+                }
 
-            //     let next_token = tokens.peek();
+                if let Ok(_) = FunctionInvocation::parse(tokens, args.clone()) {
+                    let (invocation, span) = FunctionInvocation::parse(&mut tokens.clone(), args.clone()).map_err(|err| err.with_context(ParseContext::ParsingExpression))?;
+                    return Ok((Expression::FunctionInvocation(invocation), span));
+                }
 
-            //     match next_token {
-            //         Some(Token { kind: TokenKind::Symbol(Symbol::PathSep), .. }) => {
-            //             tokens.next();
-            //             let (ident_path, _) = IdentPath::parse(tokens, ())?;
-            //             idents.extend(ident_path);
-            //             let path = IdentPath::try_from(idents).expect("invalid ident path");
+                if let Ok(_) = NestedIdent::parse(tokens, ()) {
+                    let (nested_ident, span) = NestedIdent::parse(&mut tokens.clone(), ()).map_err(|err| err.with_context(ParseContext::ParsingExpression))?;
+                    return Ok((Expression::NestedIdent(nested_ident), span));
+                }
 
-            //             tokens.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingFunctionInvocation))?;
-
-            //             let (args, _) = Vec::<Expression>::parse(tokens, ListArgs {
-            //                 args,
-            //                 separator: Symbol::Comma,
-            //                 allow_trailing: true,
-            //             })?;
-                        
-            //             let final_token = tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingFunctionInvocation))?;
-
-            //             let span = token.span.merge(final_token.span);
-                        
-            //             (Expression::FunctionInvocation(FunctionInvocation::new(path, args)), span)
-            //         },
-            //         Some(Token { kind: TokenKind::Symbol(Symbol::BracketOpen), .. }) => {
-            //             let (args, _) = Vec::<Expression>::parse(tokens, ListArgs {
-            //                 args,
-            //                 separator: Symbol::Comma,
-            //                 allow_trailing: true,
-            //             })?;
-                        
-            //             let final_token = tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingFunctionInvocation))?;
-
-            //             let path = IdentPath::try_from(idents).expect("invalid ident path");
-
-            //             let span = token.span.merge(final_token.span);
-
-            //             (Expression::FunctionInvocation(FunctionInvocation::new(path, args)), span)
-            //         }
-            //         Some(Token { kind: TokenKind::Symbol(Symbol::Dot), .. }) => {
-            //             tokens.next();
-
-            //             let (nested_ident, nested_ident_span) = NestedIdent::parse(tokens, ())?;
-
-            //             for ident in nested_ident {
-            //                 idents.push(ident);
-            //             }
-            //             let nested_ident = NestedIdent::try_from(idents).expect("invalid nested ident");
-
-            //             let span = token.span
-            //                 .merge(nested_ident_span);
-
-            //             (Expression::NestedIdent(nested_ident), span)
-            //         },
-            //         _ => {
-            //             let nested_ident = NestedIdent::try_from(idents).expect("invalid nested ident");
-            //             (Expression::NestedIdent(nested_ident), token.span)
-            //         },
-            //     }
-            // }
-            _ => {
-                let (literal, span) = Literal::parse(tokens, args).map_err(|err| err.with_context(ParseContext::ParsingExpression))?;
-                (Expression::Literal(literal), span)
+                return Err(ParseError {
+                    span: token.span,
+                    context: Some(ParseContext::ParsingExpression),
+                    kind: ParseErrorKind::UnexpectedTokenKind(kind),
+                });
             },
         };
 
         Ok(spanned_expression)
+    }
+}
+
+impl Parse for Op {
+    type Args<'a> = ExpressionArgs<'a>;
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let token = tokens.expect_peek().map_err(|err| err.with_context(ParseContext::ParsingOperation))?;
+        use TokenKind as K;
+        use Symbol as S;
+        match &token.kind {
+            K::Symbol(S::Plus) | K::Symbol(S::Minus) | K::Symbol(S::Asterisk) | K::Symbol(S::ForwardSlash) => {
+                let (op, span) = ArithmeticOp::parse(tokens, args)?;
+                Ok((Op::Arithmetic(op), span))
+            },
+            K::Symbol(S::And) | K::Symbol(S::Or) | K::Symbol(S::Not) | K::Symbol(S::DoubleEqual) |
+            K::Symbol(S::LessThan) | K::Symbol(S::GreaterThan) |
+            K::Symbol(S::LessThanOrEqual) | K::Symbol(S::GreaterThanOrEqual) => {
+                let (op, span) = LogicalOp::parse(tokens, args)?;
+                Ok((Op::Logical(op), span))
+            },
+            _ => Err(ParseError {
+                span: token.span,
+                context: Some(ParseContext::ParsingOperation),
+                kind: ParseErrorKind::ExpectedTokenKindOneOf {
+                    expected: [
+                        K::Symbol(S::Plus),
+                        K::Symbol(S::Minus),
+                        K::Symbol(S::Asterisk),
+                        K::Symbol(S::ForwardSlash),
+                        K::Symbol(S::And),
+                        K::Symbol(S::Or),
+                        K::Symbol(S::Not),
+                        K::Symbol(S::DoubleEqual),
+                        K::Symbol(S::LessThan),
+                        K::Symbol(S::GreaterThan),
+                        K::Symbol(S::LessThanOrEqual),
+                        K::Symbol(S::GreaterThanOrEqual),
+                    ].into(),
+                    got: token.kind.clone(),
+                },
+            })
+        }
+    }
+}
+
+impl Parse for ArithmeticOp {
+    type Args<'a> = ExpressionArgs<'a>;
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let token = tokens.expect_token().map_err(|err| err.with_context(ParseContext::ParsingOperation))?;
+        use TokenKind as K;
+        use Symbol as S;
+        match token.kind {
+            K::Symbol(S::Plus) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((ArithmeticOp::Add(left, right), span))
+            },
+            K::Symbol(S::Minus) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((ArithmeticOp::Sub(left, right), span))
+            },
+            K::Symbol(S::Asterisk) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((ArithmeticOp::Mul(left, right), span))
+            },
+            K::Symbol(S::ForwardSlash) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((ArithmeticOp::Div(left, right), span))
+            },
+            kind => Err(ParseError {
+                span: token.span,
+                context: Some(ParseContext::ParsingOperation),
+                kind: ParseErrorKind::ExpectedTokenKindOneOf {
+                    expected: [
+                        K::Symbol(S::Plus),
+                        K::Symbol(S::Minus),
+                        K::Symbol(S::Asterisk),
+                        K::Symbol(S::ForwardSlash),
+                    ].into(),
+                    got: kind,
+                },
+            }),
+        }
+    }
+}
+
+impl Parse for LogicalOp {
+    type Args<'a> = ExpressionArgs<'a>;
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let token = tokens.expect_token().map_err(|err| err.with_context(ParseContext::ParsingOperation))?;
+        use TokenKind as K;
+        use Symbol as S;
+        
+        match token.kind {
+            K::Symbol(S::And) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((LogicalOp::And(left, right), span))
+            },
+            K::Symbol(S::Or) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((LogicalOp::Or(left, right), span))
+            },
+            K::Symbol(S::Not) => {
+                let (expr, expr_span) = Expression::parse(tokens, args.clone())?;
+                let span = token.span.merge(expr_span);
+                Ok((LogicalOp::Not(expr), span))
+            },
+            K::Symbol(S::DoubleEqual) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((LogicalOp::Eq(left, right), span))
+            },
+            K::Symbol(S::LessThan) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((LogicalOp::Lt(left, right), span))
+            },
+            K::Symbol(S::GreaterThan) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((LogicalOp::Gt(left, right), span))
+            },
+            K::Symbol(S::LessThanOrEqual) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((LogicalOp::Lte(left, right), span))
+            },
+            K::Symbol(S::GreaterThanOrEqual) => {
+                let (left, _) = Expression::parse(tokens, args.clone())?;
+                let (right, right_span) = Expression::parse(tokens, args)?;
+                let span = token.span.merge(right_span);
+                Ok((LogicalOp::Gte(left, right), span))
+            },
+            kind => Err(ParseError {
+                span: token.span,
+                context: Some(ParseContext::ParsingOperation),
+                kind: ParseErrorKind::ExpectedTokenKindOneOf {
+                    expected: [
+                        K::Symbol(S::And),
+                        K::Symbol(S::Or),
+                        K::Symbol(S::Not),
+                        K::Symbol(S::DoubleEqual),
+                        K::Symbol(S::LessThan),
+                        K::Symbol(S::GreaterThan),
+                        K::Symbol(S::LessThanOrEqual),
+                        K::Symbol(S::GreaterThanOrEqual),
+                    ].into(),
+                    got: kind,
+                },
+            }),
+        }
     }
 }
 
@@ -995,6 +1032,28 @@ impl Parse for Function {
         })?;
 
         Ok((function, span))
+    }
+}
+
+impl Parse for FunctionInvocation {
+    type Args<'a> = ExpressionArgs<'a>;
+
+    fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
+        let (path, path_span) = IdentPath::parse(tokens, ()).map_err(|err| err.with_context(ParseContext::ParsingFunctionInvocation))?;
+        
+        tokens.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingFunctionInvocation))?;
+        
+        let (args_list, _) = Vec::<Expression>::parse(tokens, ListArgs {
+            args,
+            separator: Symbol::Comma,
+            allow_trailing: true,
+        })?;
+        
+        let bracket = tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingFunctionInvocation))?;
+
+        let span = path_span.merge(bracket.span);
+        
+        Ok((FunctionInvocation::new(path, args_list), span))
     }
 }
 
@@ -1067,15 +1126,19 @@ impl Parse for Branch {
     type Args<'a> = ExpressionArgs<'a>;
 
     fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
-        let bracket_token = tokens.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingBranch))?;
-        let (ident, _) = Ident::parse(tokens, ()).map_err(|err| err.with_context(ParseContext::ParsingBranch))?;
-        tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingBranch))?;
-        
+        let (ident, ident_span) = Option::<Wrapped::<Ident>>::parse(tokens, WrappedArgs {
+            args: (),
+            open: Symbol::BracketOpen,
+            close: Symbol::BracketClose,
+        })?;
+        let ident = ident.map(Wrapped::unwrap).unwrap_or(id!("_"));
+           
         tokens.expect_symbol(Symbol::RightFatArrow).map_err(|err| err.with_context(ParseContext::ParsingBranch))?;
+        let start_span = ident_span;
         
         let (expression, expr_span) = Expression::parse(tokens, args)?;
 
-        let span = bracket_token.span.merge(expr_span);
+        let span = start_span.merge(expr_span);
 
         Ok((Branch::new(ident, expression), span))
     }
@@ -1129,7 +1192,7 @@ impl Parse for CompositeLiteralInner {
                 let (literal, span) = StructLiteral::parse(tokens, args)?;
                 Ok((CompositeLiteralInner::Struct(literal), span))
             },
-            TokenKind::Symbol(Symbol::Hash) => {
+            TokenKind::Symbol(Symbol::Dot) => {
                 let (literal, span) = EnumLiteral::parse(tokens, args)?;
                 Ok((CompositeLiteralInner::Enum(literal), span))
             },
@@ -1144,7 +1207,7 @@ impl Parse for CompositeLiteralInner {
                     kind: ParseErrorKind::ExpectedTokenKindOneOf {
                         expected: [
                             TokenKind::Symbol(Symbol::CurlyBracketOpen),
-                            TokenKind::Symbol(Symbol::Hash),
+                            TokenKind::Symbol(Symbol::Dot),
                             TokenKind::Symbol(Symbol::SquareBracketOpen),
                         ].into(),
                         got: kind.clone(),
@@ -1178,15 +1241,18 @@ impl Parse for EnumLiteral {
     type Args<'a> = ExpressionArgs<'a>;
 
     fn parse<'a>(tokens: &mut TokenSlice<'a>, args: Self::Args<'_>) -> Result<(Self, Span), ParseError> where Self: Sized {
-        let hash = tokens.expect_symbol(Symbol::Hash).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
+        let dot = tokens.expect_symbol(Symbol::Dot).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
         
         let (tag, _) = Ident::parse(tokens, ()).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
-        
-        tokens.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
-        let (expr, _) = Expression::parse(tokens, args)?;
-        let bracket = tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingEnumLiteral))?;
 
-        let span = hash.span.merge(bracket.span);
+        let (expr, expr_span) = Option::<Wrapped<Expression>>::parse(tokens, WrappedArgs {
+            args,
+            open: Symbol::BracketOpen,
+            close: Symbol::BracketClose,
+        })?;
+        let expr = expr.map(Wrapped::unwrap).unwrap_or(Expression::Literal(Literal::UNIT));
+
+        let span = dot.span.merge(expr_span);
 
         Ok((EnumLiteral::new(tag, expr), span))
     }

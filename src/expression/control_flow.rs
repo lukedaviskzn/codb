@@ -216,7 +216,7 @@ mod tests {
         let relations = DbRelationSet::new();
         let registry = Registry::new(pager.clone(), &relations);
 
-        let result_ttype_id = TTypeId::from(id_path!("Result"));
+        let result_ttype_id = TTypeId::from(id_path!("std::Result"));
 
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Literal(Literal::Composite(
@@ -261,7 +261,7 @@ mod tests {
         let expr = Expression::ControlFlow(Box::new(ControlFlow::Match(MatchControlFlow {
             param: Expression::Literal(Literal::Composite(
                 CompositeLiteral {
-                    ttype_id: id_path!("Result").into(),
+                    ttype_id: id_path!("std::Result").into(),
                     inner: EnumLiteral::new(
                         id!("Err"),
                         Expression::Literal(ScalarValue::String("my_error".into()).into()),

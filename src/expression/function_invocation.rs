@@ -91,12 +91,12 @@ mod tests {
         let registry = Registry::new(pager.clone(), &relations);
 
         let expr_panic = Expression::FunctionInvocation(FunctionInvocation {
-            function: id_path!("unwrap"),
+            function: id_path!("std::unwrap"),
             args: [
                 Expression::Literal(
                     Literal::Composite(
                         CompositeLiteral {
-                            ttype_id: id_path!("Result").into(),
+                            ttype_id: id_path!("std::Result").into(),
                             inner: EnumLiteral::new(
                                 id!("Err"),
                                 Expression::Literal(ScalarValue::String("my_error".into()).into()),
@@ -115,12 +115,12 @@ mod tests {
         assert_eq!("my_error", panic_message);
 
         let expr_pass = Expression::FunctionInvocation(FunctionInvocation {
-            function: id_path!("unwrap"),
+            function: id_path!("std::unwrap"),
             args: [
                 Expression::Literal(
                     Literal::Composite(
                         CompositeLiteral {
-                            ttype_id: id_path!("Result").into(),
+                            ttype_id: id_path!("std::Result").into(),
                             inner: EnumLiteral::new(
                                 id!("Ok"),
                                 Expression::Literal(Literal::UNIT),

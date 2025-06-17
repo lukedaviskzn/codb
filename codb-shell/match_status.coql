@@ -1,5 +1,7 @@
-match UserStatus#Inactive(unit) {
+// `UserStatus.Inactive` and `UserStatus.Inactive(unit)` are equivalent
+match UserStatus.Inactive {
+    // `Active(_) => ...` and `Active => ...` are equivalent
     Active(_) => "A",
-    Inactive(_) => "B",
+    Inactive => "B",
     Other(_) => "C",
 } -> string
