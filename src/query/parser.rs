@@ -553,31 +553,12 @@ impl Parse for TTypeId {
                 (TTypeId::Scalar(scalar_type), token.span)
             },
             TokenKind::Keyword(Keyword::Struct | Keyword::Enum) => {
-                let (composite_type, type_span) = CompositeType::parse(tokens, ())?;
-
-                let span = token.span
-                    .merge(type_span)
-                    .extend(Some(1))
-                    .prepend(Some(1));
+                let (composite_type, span) = CompositeType::parse(tokens, ())?;
 
                 (TTypeId::Composite(CompositeTTypeId::Anonymous(Box::new(composite_type))), span)
             },
-            TokenKind::Ident(ident) => {
-                tokens.expect_token()?;
-                let mut idents = vec![ident];
-
-                let mut span = token.span;
-
-                if let Some(_) = tokens.next_if_symbol(Symbol::PathSep) {
-                    let (ident_path, path_span) = IdentPath::parse(tokens, ())?;
-                    span = span.merge(path_span);
-
-                    for ident in ident_path {
-                        idents.push(ident);
-                    }
-                }
-
-                let path = IdentPath::try_from(idents).expect("invalid ident path");
+            TokenKind::Ident(_) => {
+                let (path, span) = IdentPath::parse(tokens, ()).map_err(|err| err.with_context(ParseContext::ParsingTTypeId))?;
                 
                 (TTypeId::Composite(CompositeTTypeId::Path(path)), span)
             },
@@ -822,20 +803,16 @@ impl Parse for Expression {
                 let (action, span) = match action_str {
                     "range" => {
                         tokens.expect_symbol(Symbol::LessThan).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (ident_forest, forest_span) = IdentForest::parse(tokens, ())?;
+                        let (ident_forest, _) = IdentForest::parse(tokens, ())?;
                         tokens.expect_symbol(Symbol::GreaterThan).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
                         tokens.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (start, start_span) = Expression::parse(tokens, args.clone())?;
+                        let (start, _) = Expression::parse(tokens, args.clone())?;
                         tokens.expect_symbol(Symbol::Comma).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (end, end_span) = Expression::parse(tokens, args.clone())?;
-                        tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
+                        let (end, _) = Expression::parse(tokens, args.clone())?;
+                        let bracket = tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
-                        let span = token.span
-                            .merge(forest_span)
-                            .merge(start_span)
-                            .merge(end_span)
-                            .extend(Some(1));
+                        let span = token.span.merge(bracket.span);
 
                         (InterpreterAction::Range {
                             relation,
@@ -846,12 +823,10 @@ impl Parse for Expression {
                     },
                     "insert" => {
                         tokens.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (new_row, row_span) = Expression::parse(tokens, args.clone())?;
-                        tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
+                        let (new_row, _) = Expression::parse(tokens, args.clone())?;
+                        let bracket = tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
-                        let span = token.span
-                            .merge(row_span)
-                            .extend(Some(1));
+                        let span = token.span.merge(bracket.span);
 
                         (InterpreterAction::Insert {
                             relation,
@@ -860,12 +835,10 @@ impl Parse for Expression {
                     },
                     "extend" => {
                         tokens.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (new_rows, row_span) = Expression::parse(tokens, args.clone())?;
-                        tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
+                        let (new_rows, _) = Expression::parse(tokens, args.clone())?;
+                        let bracket = tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
-                        let span = token.span
-                            .merge(row_span)
-                            .extend(Some(1));
+                        let span = token.span.merge(bracket.span);
 
                         (InterpreterAction::Extend {
                             relation,
@@ -874,12 +847,10 @@ impl Parse for Expression {
                     },
                     "remove" => {
                         tokens.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (pkey, row_span) = Expression::parse(tokens, args.clone())?;
-                        tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
+                        let (pkey, _) = Expression::parse(tokens, args.clone())?;
+                        let bracket = tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
-                        let span = token.span
-                            .merge(row_span)
-                            .extend(Some(1));
+                        let span = token.span.merge(bracket.span);
 
                         (InterpreterAction::Remove {
                             relation,
@@ -888,12 +859,10 @@ impl Parse for Expression {
                     },
                     "retain" => {
                         tokens.expect_symbol(Symbol::BracketOpen).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
-                        let (function, function_span) = Function::parse(tokens, args.clone())?;
-                        tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
+                        let (function, _) = Function::parse(tokens, args.clone())?;
+                        let bracket = tokens.expect_symbol(Symbol::BracketClose).map_err(|err| err.with_context(ParseContext::ParsingAction))?;
 
-                        let span = token.span
-                            .merge(function_span)
-                            .extend(Some(1));
+                        let span = token.span.merge(bracket.span);
 
                         (InterpreterAction::Retain {
                             relation,
@@ -1243,7 +1212,7 @@ impl Parse for ArrayLiteral {
 
 #[cfg(test)]
 mod tests {
-    use std::{ops::Bound, sync::{Arc, Mutex}};
+    use std::sync::{Arc, Mutex};
 
     use crate::{db::{pager::Pager, registry::Registry, DbRelationSet}, expression::Expression, lex, ExpressionArgs, Parse, TokenSlice};
 
@@ -1272,7 +1241,7 @@ mod tests {
         let relations = DbRelationSet::new();
         let registry = Registry::new(pager.clone(), &relations);
 
-        let tokens = lex(string.chars()).expect("failed to lex");
+        let tokens = lex(string).expect("failed to lex");
         let expr = Expression::parse(&mut TokenSlice::from(&*tokens), ExpressionArgs {
             pager,
             registry: &registry,
@@ -1284,10 +1253,9 @@ mod tests {
                 dbg!(expr);
             },
             Err(err) => {
-                let rest = match err.span.end_bound() {
-                    Bound::Included(i) => i + 1,
-                    Bound::Excluded(i) => i,
-                    Bound::Unbounded => string.len(),
+                let rest = match err.span.end {
+                    Some(i) => i,
+                    None => string.len(),
                 };
                 let rest = &string[rest..];
                 println!("{}\x1b[31;1m{}\x1b[0m{}", &string[..err.span.start], &string[err.span.into_range()], rest);

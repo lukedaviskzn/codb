@@ -232,7 +232,7 @@ impl Debug for Symbol {
 
 fn expect_next(chars: &mut impl Iterator<Item = (usize, char)>) -> Result<(usize, char), LexError> {
     chars.next().ok_or(LexError {
-        span: (..).into(),
+        span: Span::ALL,
         context: None,
         kind: LexErrorKind::UnexpectedEnd,
     })
@@ -243,7 +243,7 @@ fn expect_char(chars: &mut impl Iterator<Item = (usize, char)>, char: char) -> R
     
     if next_char != char {
         return Err(LexError {
-            span: Span::at(index),
+            span: Span::new(index, next_char.len_utf8()),
             context: None,
             kind: LexErrorKind::ExpectedChar {
                 expected: char,
@@ -377,8 +377,8 @@ impl<'a> Iterator for TokenSlice<'a> {
     }
 }
 
-pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, LexError> {
-    let mut chars = chars.enumerate().peekable();
+pub(crate) fn lex(chars: &str) -> Result<Box<[Token]>, LexError> {
+    let mut chars = chars.char_indices().peekable();
     
     let mut tokens = vec![];
 
@@ -421,11 +421,12 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
         // identifiers
         if next_char.is_alphabetic() || next_char == '_' {
             let mut ident = String::from(next_char);
-            let mut ident_len = 1;
 
-            while let Some((_, char)) = chars.next_if(|(_, c)| c.is_alphanumeric() || *c == '_') {
+            let mut end = index + next_char.len_utf8();
+
+            while let Some((index, char)) = chars.next_if(|(_, c)| c.is_alphanumeric() || *c == '_') {
                 ident.push(char);
-                ident_len += 1;
+                end = index + char.len_utf8();
             }
 
             let kind;
@@ -457,43 +458,38 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
             }
 
             token = Some(Token {
-                span: Span::with_len(index, ident_len),
+                span: Span::new(index, end),
                 kind,
             });
         }
 
         if next_char.is_numeric() {
-            let mut number_string_length = 1;
+            let mut end = index + next_char.len_utf8();
 
             let mut number_string = String::from(next_char);
 
-            while let Some((_, char)) = chars.next_if(|(_, c)| c.is_numeric() || *c == '_') {
+            while let Some((index, char)) = chars.next_if(|(_, c)| c.is_numeric() || *c == '_') {
                 if char.is_numeric() {
                     number_string.push(char);
                 }
-                number_string_length += 1;
+                end = index + char.len_utf8();
             }
 
-            let i_index = match expect_char(&mut chars, 'i') {
-                Ok(index) => index,
-                Err(err) => return Err(err.with_context(LexContext::LexingInteger)),
-            };
-
-            let mut number_bit_string_length = 0;
+            expect_char(&mut chars, 'i').map_err(|err| err.with_context(LexContext::LexingInteger))?;
 
             let mut number_bits_string = String::new();
 
-            while let Some((_, char)) = chars.next_if(|(_, c)| c.is_numeric() || *c == '_') {
+            while let Some((index, char)) = chars.next_if(|(_, c)| c.is_numeric() || *c == '_') {
                 if char.is_numeric() {
                     number_bits_string.push(char);
                 }
-                number_bit_string_length += 1;
+                end = index + char.len_utf8();
             }
 
             let number: i64 = match number_string.parse() {
                 Ok(number) => number,
                 Err(err) => return Err(LexError {
-                    span: Span::with_len(index, number_string_length),
+                    span: Span::new(index, end),
                     context: Some(LexContext::LexingInteger),
                     kind: LexErrorKind::ParseIntError(err),
                 }),
@@ -502,7 +498,7 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
             let number_bits: u8 = match number_bits_string.parse() {
                 Ok(number) => number,
                 Err(err) => return Err(LexError {
-                    span: Span::with_len(index, number_string_length),
+                    span: Span::new(index, end),
                     context: Some(LexContext::LexingInteger),
                     kind: LexErrorKind::ParseIntError(err),
                 }),
@@ -510,15 +506,15 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
 
             match number_bits {
                 32 => token = Some(Token {
-                    span: Span::with_len(i_index + 1, number_bit_string_length),
+                    span: Span::new(index, end),
                     kind: TokenKind::ScalarLiteral(ScalarValue::Int32(number as i32)),
                 }),
                 64 => token = Some(Token {
-                    span: Span::with_len(i_index + 1, number_bit_string_length),
+                    span: Span::new(index, end),
                     kind: TokenKind::ScalarLiteral(ScalarValue::Int64(number)),
                 }),
                 bits => return Err(LexError {
-                    span: Span::with_len(i_index + 1, number_bit_string_length),
+                    span: Span::new(index, end),
                     context: Some(LexContext::LexingInteger),
                     kind: LexErrorKind::IntegerBits(bits),
                 }),
@@ -529,20 +525,19 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
         if next_char == '"' {
             let mut string_contents = String::new();
 
-            let mut token_length = 1;
+            let end_index;
 
             loop {
                 let Some((index, next_char)) = chars.next() else {
                     return Err(LexError {
-                        span: Span::beyond(index),
+                        span: Span::from(index),
                         context: Some(LexContext::LexingString),
                         kind: LexErrorKind::UnexpectedEnd,
                     });
                 };
 
-                token_length += 1;
-
                 if next_char == '"' {
+                    end_index = index + next_char.len_utf8();
                     break;
                 }
 
@@ -553,12 +548,11 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
 
                 let Some((index, next_char)) = chars.next() else {
                     return Err(LexError {
-                        span: Span::beyond(index),
+                        span: Span::from(index),
                         context: Some(LexContext::LexingString),
                         kind: LexErrorKind::UnexpectedEnd,
                     });
                 };
-                token_length += 1;
 
                 let replacement_char = match next_char {
                     'n' => '\n',
@@ -573,11 +567,10 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
                             Ok(next) => next,
                             Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
-                        let (index, second_char) = match expect_next(&mut chars) {
+                        let (end_index, second_char) = match expect_next(&mut chars) {
                             Ok(next) => next,
                             Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
-                        token_length += 2;
 
                         let mut hex_string = String::from(first_char);
                         hex_string.push(second_char);
@@ -585,7 +578,7 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
                         let byte = match u8::from_str_radix(&hex_string, 16) {
                             Ok(byte) => byte,
                             Err(err) => return Err(LexError {
-                                span: Span::with_len(index-3, 4),
+                                span: Span::new(index, end_index),
                                 context: Some(LexContext::LexingString),
                                 kind: LexErrorKind::ParseIntError(err),
                             }),
@@ -594,8 +587,7 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
                         byte as char
                     },
                     'u' => {
-                        
-                        let (_, first_char) = match expect_next(&mut chars) {
+                        let (start_index, first_char) = match expect_next(&mut chars) {
                             Ok(next) => next,
                             Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
@@ -607,11 +599,10 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
                             Ok(next) => next,
                             Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
-                        let (index, fourth_char) = match expect_next(&mut chars) {
+                        let (end_index, fourth_char) = match expect_next(&mut chars) {
                             Ok(next) => next,
                             Err(err) => return Err(err.with_context(LexContext::LexingString)),
                         };
-                        token_length += 4;
 
                         let mut hex_string = String::from(first_char);
                         hex_string.push(second_char);
@@ -621,7 +612,7 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
                         let char_u32 = match u32::from_str_radix(&hex_string, 16) {
                             Ok(byte) => byte,
                             Err(err) => return Err(LexError {
-                                span: Span::with_len(index-5, 6),
+                                span: Span::new(start_index, end_index),
                                 context: Some(LexContext::LexingString),
                                 kind: LexErrorKind::ParseIntError(err),
                             }),
@@ -630,14 +621,14 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
                         match char::from_u32(char_u32) {
                             Some(c) => c,
                             None => return Err(LexError {
-                                span: Span::with_len(index-5, 6),
+                                span: Span::new(start_index, end_index),
                                 context: Some(LexContext::LexingString),
                                 kind: LexErrorKind::NotUnicode(char_u32),
                             }),
                         }
                     },
                     c => return Err(LexError {
-                        span: Span::at(index),
+                        span: Span::new(index, index + c.len_utf8()),
                         context: Some(LexContext::LexingString),
                         kind: LexErrorKind::UnexpectedChar(c),
                     }),
@@ -647,35 +638,35 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
             }
 
             token = Some(Token {
-                span: Span::with_len(index, token_length),
+                span: Span::new(index, end_index),
                 kind: TokenKind::ScalarLiteral(ScalarValue::String(string_contents)),
             })
         }
 
         if next_char == '.' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::Dot),
             });
         }
 
         if next_char == ',' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::Comma),
             });
         }
 
         if next_char == ':' {
             // symbol '::'
-            if let Some((_, _)) = chars.next_if(|(_, c)| *c == ':') {
+            if let Some((_, c)) = chars.next_if(|(_, c)| *c == ':') {
                 token = Some(Token {
-                    span: Span::with_len(index, 2),
+                    span: Span::new(index, index + next_char.len_utf8() + c.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::PathSep),
                 });
             } else { // just ':'
                 token = Some(Token {
-                    span: Span::at(index),
+                    span: Span::new(index, index + next_char.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::Colon),
                 });
             }
@@ -683,63 +674,63 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
 
         if next_char == '(' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::BracketOpen),
             });
         }
 
         if next_char == ')' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::BracketClose),
             });
         }
 
         if next_char == '[' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::SquareBracketOpen),
             });
         }
 
         if next_char == ']' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::SquareBracketClose),
             });
         }
 
         if next_char == '{' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::CurlyBracketOpen),
             });
         }
 
         if next_char == '}' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::CurlyBracketClose),
             });
         }
 
         if next_char == '+' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::Plus),
             });
         }
 
         if next_char == '-' {
             // symbol '->'
-            if let Some((_, _)) = chars.next_if(|(_, c)| *c == '>') {
+            if let Some((_, c)) = chars.next_if(|(_, c)| *c == '>') {
                 token = Some(Token {
-                    span: Span::with_len(index, 2),
+                    span: Span::new(index, index + next_char.len_utf8() + c.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::RightArrow),
                 });
             } else { // just '-'
                 token = Some(Token {
-                    span: Span::at(index),
+                    span: Span::new(index, index + next_char.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::Minus),
                 });
             }
@@ -747,35 +738,35 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
 
         if next_char == '*' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::Asterisk),
             });
         }
 
         if next_char == '/' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::ForwardSlash),
             });
         }
 
         if next_char == '=' {
-            if let Some((_, _)) = chars.next_if(|(_, c)| *c == '=') {
+            if let Some((_, c)) = chars.next_if(|(_, c)| *c == '=') {
                 // symbol '=='
                 token = Some(Token {
-                    span: Span::with_len(index, 2),
+                    span: Span::new(index, index + next_char.len_utf8() + c.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::DoubleEqual),
                 });
-            } else if let Some((_, _)) = chars.next_if(|(_, c)| *c == '>') {
+            } else if let Some((_, c)) = chars.next_if(|(_, c)| *c == '>') {
                 // symbol '=>'
                 token = Some(Token {
-                    span: Span::with_len(index, 2),
+                    span: Span::new(index, index + next_char.len_utf8() + c.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::RightFatArrow),
                 });
             } else {
                 // just '='
                 token = Some(Token {
-                    span: Span::at(index),
+                    span: Span::new(index, index + next_char.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::Equal),
                 });
             }
@@ -783,14 +774,14 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
 
         if next_char == '<' {
             // symbol '<='
-            if let Some((_, _)) = chars.next_if(|(_, c)| *c == '=') {
+            if let Some((_, c)) = chars.next_if(|(_, c)| *c == '=') {
                 token = Some(Token {
-                    span: Span::with_len(index, 2),
+                    span: Span::new(index, index + next_char.len_utf8() + c.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::LessThanOrEqual),
                 });
             } else { // just '<'
                 token = Some(Token {
-                    span: Span::at(index),
+                    span: Span::new(index, index + next_char.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::LessThan),
                 });
             }
@@ -798,14 +789,14 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
 
         if next_char == '>' {
             // symbol '>='
-            if let Some((_, _)) = chars.next_if(|(_, c)| *c == '=') {
+            if let Some((_, c)) = chars.next_if(|(_, c)| *c == '=') {
                 token = Some(Token {
-                    span: Span::with_len(index, 2),
+                    span: Span::new(index, index + next_char.len_utf8() + c.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::GreaterThanOrEqual),
                 });
-            } else { // just '<'
+            } else { // just '>'
                 token = Some(Token {
-                    span: Span::at(index),
+                    span: Span::new(index, index + next_char.len_utf8()),
                     kind: TokenKind::Symbol(Symbol::GreaterThan),
                 });
             }
@@ -813,7 +804,7 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
 
         if next_char == '#' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::Hash),
             });
         }
@@ -823,7 +814,7 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
                 return Err(err.with_context(LexContext::LexingSymbol));
             }
             token = Some(Token {
-                span: Span::with_len(index, 2),
+                span: Span::new(index, index + next_char.len_utf8() * 2),
                 kind: TokenKind::Symbol(Symbol::And),
             });
         }
@@ -833,14 +824,14 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
                 return Err(err.with_context(LexContext::LexingSymbol));
             }
             token = Some(Token {
-                span: Span::with_len(index, 2),
+                span: Span::new(index, index + next_char.len_utf8() * 2),
                 kind: TokenKind::Symbol(Symbol::Or),
             });
         }
 
         if next_char == '!' {
             token = Some(Token {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 kind: TokenKind::Symbol(Symbol::Not),
             });
         }
@@ -849,7 +840,7 @@ pub(crate) fn lex(chars: impl Iterator<Item = char>) -> Result<Box<[Token]>, Lex
             tokens.push(token)
         } else {
             return Err(LexError {
-                span: Span::at(index),
+                span: Span::new(index, index + next_char.len_utf8()),
                 context: None,
                 kind: LexErrorKind::UnexpectedChar(next_char),
             });
@@ -887,7 +878,7 @@ mod tests {
         ]
         "#;
 
-        let token_kinds = lex(text_string.chars()).expect("failed to lex")
+        let token_kinds = lex(text_string).expect("failed to lex")
             .into_iter().map(|token| token.kind).collect_vec();
 
         use super::TokenKind as T;

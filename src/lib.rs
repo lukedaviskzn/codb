@@ -63,7 +63,7 @@ impl Connection {
             let registry = manifest.registry();
             let relations = manifest.relations(self.db.pager().clone());
             
-            let tokens = lex(query.chars())?;
+            let tokens = lex(query)?;
             let (DataQuery(expr), _) = DataQuery::parse(&mut TokenSlice::from(&*tokens), ExpressionArgs {
                 pager: self.db.pager().clone(),
                 registry,
@@ -77,7 +77,7 @@ impl Connection {
     }
 
     pub fn execute_schema(&self, query: &str) -> Result<Value, ConnectionExecutionError> {
-        let tokens = lex(query.chars())?;
+        let tokens = lex(query)?;
         let (query, _) = SchemaQuery::parse(&mut TokenSlice::from(&*tokens), ())?;
 
         Ok(self.db.execute(Query::Schema(query))?)

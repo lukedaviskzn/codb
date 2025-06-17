@@ -380,7 +380,7 @@ mod tests {
                 struct { id: int32 } { id: - 0i32 10i32 },
                 struct { id: int32 } { id: 10i32 }
             )
-        ".chars()).expect("failed to lex");
+        ").expect("failed to lex");
 
         let query = {
             let manifest = db.manifest();
@@ -418,7 +418,7 @@ mod tests {
                 // 0-1 instead of just -1 since negation operator isn't finished
                 struct { id: int32 } { id: - 0i32 1i32 }
             )
-        ".chars()).expect("failed to lex");
+        ").expect("failed to lex");
 
         let query = {
             let manifest = db.manifest();

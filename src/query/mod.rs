@@ -1,4 +1,4 @@
-use std::{fmt::{Debug, Display}, ops::{Bound, RangeBounds}};
+use std::{fmt::{Debug, Display}, ops::Bound};
 
 use crate::{expression::{EvalError, Expression}, query::schema_query::{SchemaError, SchemaQuery}, typesystem::TypeError};
 
@@ -8,119 +8,58 @@ pub mod schema_query;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Span {
-    pub start: usize,
-    pub length: Option<usize>,
+    start: usize,
+    end: Option<usize>,
 }
 
 impl Span {
     pub const ALL: Span = Span {
         start: 0,
-        length: None,
+        end: None,
     };
 
-    pub fn at(start: usize) -> Span {
+    pub fn new(start: usize, end: usize) -> Span {
         Span {
             start,
-            length: Some(1),
+            end: Some(end),
         }
     }
 
-    pub fn beyond(start: usize) -> Span {
+    pub fn from(start: usize) -> Span {
         Span {
             start,
-            length: None,
+            end: None,
         }
     }
 
-    pub fn with_len(start: usize, length: usize) -> Span {
+    pub fn merge(&self, other: Span) -> Span {
         Span {
-            start,
-            length: Some(length),
-        }
-    }
-    
-    pub fn new(start: usize, length: Option<usize>) -> Span {
-        Span {
-            start,
-            length,
-        }
-    }
-
-    pub fn merge(self, other: Span) -> Span {
-        let start = self.start.min(other.start);
-        let length = if let Some(self_len) = self.length {
-            if let Some(other_len) = other.length {
-                Some((self.start + self_len).max(other.start + other_len) - start)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        Span {
-            start,
-            length,
-        }
-    }
-
-    pub fn extend(self, new_length: Option<usize>) -> Span {
-        Self {
-            start: self.start,
-            length: new_length.map(|nl| self.length.map(|l| l + nl)).flatten(),
-        }
-    }
-
-    pub fn prepend(self, move_left: Option<usize>) -> Span {
-        Self {
-            start: move_left.map(|l| self.start.checked_sub(l)).flatten().unwrap_or_default(),
-            length: self.length,
+            start: self.start.min(other.start),
+            end: self.end.map(|self_end|
+                other.end.map(|other_end|
+                    self_end.max(other_end)
+                )
+            ).flatten(),
         }
     }
 
     pub fn into_range(self) -> (Bound<usize>, Bound<usize>) {
         (
             Bound::Included(self.start),
-            self.end_bound(),
+            match self.end {
+                Some(end) => Bound::Excluded(end),
+                None => Bound::Unbounded,
+            },
         )
-    }
-
-    pub fn end_bound(&self) -> Bound<usize> {
-        self.length.map(|l| Bound::Excluded(self.start + l)).unwrap_or(Bound::Unbounded)
-    }
-}
-
-impl<T: RangeBounds<usize>> From<T> for Span {
-    fn from(value: T) -> Self {
-        let start = match value.start_bound() {
-            Bound::Included(index) => *index,
-            Bound::Excluded(index) => index - 1,
-            Bound::Unbounded => 0,
-        };
-        let length = match value.end_bound() {
-            Bound::Included(end) => Some(end + 1 - start),
-            Bound::Excluded(end) => Some(end - start),
-            Bound::Unbounded => None,
-        };
-        Self {
-            start,
-            length,
-        }
-    }
-}
-
-impl Into<(Bound<usize>, Bound<usize>)> for Span {
-    fn into(self) -> (Bound<usize>, Bound<usize>) {
-        self.into_range()
     }
 }
 
 impl Debug for Span {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.start)?;
-        if let Some(length) = self.length {
-            if length > 1 {
-                write!(f, "..")?;
-                write!(f, "{}", self.start + length)?;
+        if let Some(end) = self.end {
+            if end > 1 {
+                write!(f, "..{end}")?;
             }
         } else {
             write!(f, "..")?;
