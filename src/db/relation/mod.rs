@@ -4,7 +4,7 @@ use codb_core::IdentForest;
 
 use crate::{db::registry::{Registry, TTypeId}, query::schema_query::SchemaError, typesystem::{ttype::StructType, value::StructValue, TypeError}};
 
-pub mod memory;
+pub mod pager;
 
 pub type Key = StructValue;
 pub type Row = StructValue;

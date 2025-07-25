@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, io, sync::{Arc, Mutex}};
 use codb_core::Ident;
 use pager::{DbHeader, FreeListPage, HeaderReadGuard, LinkedPageReadGuard, LinkedPageWriteGuard, Page, PagePtr, Pager};
 use registry::Registry;
-use relation::memory::PagerRelation;
+use relation::pager::PagerRelation;
 
 use crate::{db::{registry::module::Module, relation::Schema}, error::NormaliseToIo, query::{schema_query::{ModuleSchemaQuery, RelationSchemaQuery, SchemaError, SchemaQuery, TypeSchemaQuery}, DataQuery, Query, QueryExecutionError}, typesystem::{scope::{ScopeTypes, ScopeValues}, value::{ScalarValue, Value}}};
 
@@ -229,7 +229,7 @@ mod tests {
 
     use crate::{db::{registry::TTypeId, relation::{Relation, Schema}, Db}, expression::{CompositeLiteral, Expression, InterpreterAction, Literal, StructLiteral}, query::{lex::{lex, TokenSlice}, parser::{ExpressionArgs, Parse}, schema_query::{RelationSchemaQuery, SchemaQuery, TypeSchemaQuery}, DataQuery, Query}, typesystem::{ttype::{CompositeType, StructType}, value::{ArrayValue, CompositeValue, EnumValue, ScalarValue, StructValue, Value}}};
 
-    use super::{pager::Pager, relation::memory::PagerRelation};
+    use super::{pager::Pager, relation::pager::PagerRelation};
 
     fn db_initial_values() -> [StructValue; 3] {
         let mut rows = [

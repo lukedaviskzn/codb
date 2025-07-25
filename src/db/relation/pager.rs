@@ -26,18 +26,18 @@ impl PagerRelation {
     }
 }
 
-enum MemRelationIter<T: Iterator<Item = Row>, U: Iterator<Item = Row>> {
+enum PagerRelationIter<T: Iterator<Item = Row>, U: Iterator<Item = Row>> {
     Index(T),
     Scan(U),
 }
 
-impl<T: Iterator<Item = Row>, U: Iterator<Item = Row>> Iterator for MemRelationIter<T, U> {
+impl<T: Iterator<Item = Row>, U: Iterator<Item = Row>> Iterator for PagerRelationIter<T, U> {
     type Item = Row;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            MemRelationIter::Index(iter) => iter.next(),
-            MemRelationIter::Scan(iter) => iter.next(),
+            PagerRelationIter::Index(iter) => iter.next(),
+            PagerRelationIter::Scan(iter) => iter.next(),
         }
     }
 }
@@ -63,10 +63,10 @@ impl Relation for PagerRelation {
         }
 
         if selected_type.eq(&self.schema.pkey_ttype(registry).expect("invalid pkey")) {
-            MemRelationIter::Index(self.rows.range(range).map(|(_, row)| row.clone()))
+            PagerRelationIter::Index(self.rows.range(range).map(|(_, row)| row.clone()))
         } else {
             let owned_range = (range.start_bound().cloned(), range.end_bound().cloned());
-            MemRelationIter::Scan(self.rows.iter().filter(move |(pkey, _)| owned_range.contains(pkey)).map(|(_, row)| row.clone()))
+            PagerRelationIter::Scan(self.rows.iter().filter(move |(pkey, _)| owned_range.contains(pkey)).map(|(_, row)| row.clone()))
         }
     }
 
@@ -114,7 +114,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_relation() {
+    fn pager_relation() {
         fn new_user(id: i32, active: bool) -> StructValue {
             // SAFETY: test case
             unsafe { StructValue::new_unchecked(indexmap! {
