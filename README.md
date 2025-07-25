@@ -13,13 +13,15 @@ page is the DB header. Which starts with the magic
 string "CoDB", followed by 3 u8's corresponding to 
 the major, minor, and patch versions of the DB that
 created the file. Then followed by 2 u64 "page 
-pointers", the first being the DB manifest, and the second being the freelist. The freelist is not implemented, but would simply be linked list of 
+pointers", the first being the DB manifest, and the 
+second being the freelist. The freelist is not 
+implemented, but would simply be linked list of 
 all pages that are freed by the pager.
 
 The DB manifest consists of a registry, and the 
 relation set page pointer. These are encoded into 
-strings and concatenated. The registry contains some 
-information about types, while the relation set 
+binary strings and concatenated. The registry contains 
+types and functions, while the relation set 
 contains a map from a relation name to it's first page.
 
 The registry starts with a root module, which 
